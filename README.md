@@ -1,3 +1,15 @@
+---
+title: Análise de FIDCs — Mercado Brasileiro (CVM)
+emoji: 📊
+colorFrom: green
+colorTo: blue
+sdk: docker
+pinned: false
+datasets:
+  - claudiormpaes/fidc-dados
+license: mit
+---
+
 # Análise de FIDCs — Panorama do mercado (dados CVM)
 
 Projeto completo para baixar, tratar e acompanhar diariamente os dados de

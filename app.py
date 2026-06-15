@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import shutil
+from pathlib import Path
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -16,6 +19,23 @@ import streamlit as st
 
 import config
 from fidc import columns as C
+
+_HF_DATASET = "claudiormpaes/fidc-dados"
+
+
+def _garantir_dados_hf(caminho: Path, filename: str) -> bool:
+    """Baixa arquivo do HF Dataset quando não existe localmente (ex: Hugging Face Space)."""
+    if caminho.exists():
+        return True
+    try:
+        from huggingface_hub import hf_hub_download
+        caminho.parent.mkdir(parents=True, exist_ok=True)
+        origem = hf_hub_download(repo_id=_HF_DATASET, filename=filename, repo_type="dataset")
+        shutil.copy(origem, caminho)
+        return True
+    except Exception as e:
+        st.warning(f"Não foi possível baixar {filename} do Hugging Face: {e}")
+        return False
 
 st.set_page_config(page_title="FIDC Analytics — CVM", page_icon="📊", layout="wide")
 
@@ -52,6 +72,7 @@ h1{font-size:1.7rem !important;}
 # --------------------------------------------------------------------------- #
 @st.cache_data(show_spinner="Carregando base de fundos...")
 def carregar_fundos() -> pd.DataFrame:
+    _garantir_dados_hf(config.CONSOLIDADO, "fidc_consolidado.parquet")
     if not config.CONSOLIDADO.exists():
         return pd.DataFrame()
     df = pd.read_parquet(config.CONSOLIDADO)
@@ -61,6 +82,7 @@ def carregar_fundos() -> pd.DataFrame:
 
 @st.cache_data(show_spinner="Carregando base de cotas...")
 def carregar_cotas() -> pd.DataFrame:
+    _garantir_dados_hf(config.CONSOLIDADO_COTAS, "fidc_cotas.parquet")
     if not config.CONSOLIDADO_COTAS.exists():
         return pd.DataFrame()
     df = pd.read_parquet(config.CONSOLIDADO_COTAS)
@@ -70,6 +92,7 @@ def carregar_cotas() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def carregar_cdi() -> pd.DataFrame:
+    _garantir_dados_hf(config.CDI_MENSAL, "cdi_mensal.parquet")
     if not config.CDI_MENSAL.exists():
         return pd.DataFrame(columns=["competencia", "cdi_mes"])
     return pd.read_parquet(config.CDI_MENSAL)

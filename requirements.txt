@@ -3,3 +3,4 @@ pyarrow>=14.0
 requests>=2.31
 plotly>=5.18
 streamlit>=1.30
+huggingface_hub>=0.23

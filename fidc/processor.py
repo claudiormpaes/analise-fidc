@@ -1,0 +1,338 @@
+"""Extrai e consolida os ZIPs da CVM em duas bases analíticas (parquet):
+
+1. fidc_consolidado.parquet — fato fundo-mês (PL, ativo, carteira, inadimplência,
+   segmentos, rating SCR, liquidez).
+2. fidc_cotas.parquet — fato série/cota-mês (senioridade, valor da cota,
+   rentabilidade, nº de cotistas, captação/amortização/resgate).
+"""
+from __future__ import annotations
+
+import csv
+import io
+import json
+import re
+import zipfile
+
+import numpy as np
+import pandas as pd
+
+import config
+from fidc import columns as C
+
+# Extrai o "nome da tabela" do arquivo: inf_mensal_fidc_<TABELA>_<AAAA[MM]>.csv
+_TBL_RE = re.compile(r"inf_mensal_fidc_(.+)_\d{4,6}\.csv$", re.IGNORECASE)
+
+
+def _tabela_do_arquivo(nome: str) -> str | None:
+    m = _TBL_RE.search(nome.rsplit("/", 1)[-1])
+    return m.group(1) if m else None
+
+
+def _ler_csv(zf: zipfile.ZipFile, nome: str) -> pd.DataFrame | None:
+    """Lê um CSV de dentro do ZIP como texto (dtype=str) e normaliza colunas-id."""
+    with zf.open(nome) as fh:
+        raw = fh.read()
+    df = pd.read_csv(
+        io.BytesIO(raw),
+        sep=config.CSV_SEP,
+        encoding=config.CSV_ENCODING,
+        dtype=str,
+        low_memory=False,
+        # Os CSVs da CVM não usam aspas; algumas razões sociais têm " solto,
+        # que faz o parser C "engolir" linhas. QUOTE_NONE lê tudo literalmente.
+        quoting=csv.QUOTE_NONE,
+    )
+    df.columns = [c.strip() for c in df.columns]
+    df = df.rename(columns=C.RENAME_ID)
+    if "cnpj" not in df.columns or "dt_comptc" not in df.columns:
+        return None
+    return df
+
+
+def _ler_tabela(zf: zipfile.ZipFile, nomes: list[str], tabela: str) -> pd.DataFrame | None:
+    """Lê e concatena TODOS os CSVs de uma tabela (match exato pelo nome da tabela).
+
+    Necessário porque o layout varia: até 2018 cada tabela é um único CSV anual
+    (tab_I_2018.csv); de 2019 em diante há um CSV por mês (tab_I_201901.csv ...).
+    O match exato evita confundir tab_X_1 com tab_X_1_1, por exemplo.
+    """
+    arquivos = [n for n in nomes if _tabela_do_arquivo(n) == tabela]
+    dfs = [d for n in arquivos if (d := _ler_csv(zf, n)) is not None]
+    if not dfs:
+        return None
+    return pd.concat(dfs, ignore_index=True)
+
+
+def _selecionar_valores(df: pd.DataFrame, mapa: dict[str, str],
+                        chave: list[str] | None = None) -> pd.DataFrame:
+    """Mantém chave + colunas de valor existentes, renomeadas e numéricas."""
+    chave = chave or C.CHAVE
+    cols = {origem: canon for canon, origem in mapa.items() if origem in df.columns}
+    out = df[chave + list(cols.keys())].rename(columns=cols)
+    for canon in cols.values():
+        out[canon] = pd.to_numeric(out[canon], errors="coerce")
+    return out.drop_duplicates(subset=chave, keep="last")
+
+
+# --------------------------------------------------------------------------- #
+# Fato fundo-mês
+# --------------------------------------------------------------------------- #
+def _processar_fundo(zf, nomes) -> pd.DataFrame:
+    base = _ler_tabela(zf, nomes, "tab_I")
+    if base is None:
+        return pd.DataFrame()
+
+    id_cols = [c for c in ["cnpj", "denom_social", "dt_comptc", "tp_fundo_classe",
+                           "cnpj_admin", "admin", "condom", "fundo_exclusivo"]
+               if c in base.columns]
+    fato = base[id_cols].drop_duplicates(subset=C.CHAVE, keep="last").merge(
+        _selecionar_valores(base, C.TAB_I_VALORES), on=C.CHAVE, how="left"
+    )
+
+    for tabela, mapa in [
+        ("tab_IV", C.TAB_IV_VALORES),
+        ("tab_II", C.TAB_II_VALORES),
+        ("tab_V", C.TAB_V_VALORES),
+        ("tab_VII", C.TAB_VII_VALORES),   # nº de cedentes (diversificação)
+        ("tab_X", C.TAB_X_RATING),        # rating SCR (pós-Res.175)
+        ("tab_X_5", C.TAB_X5_LIQUIDEZ),   # liquidez
+    ]:
+        df = _ler_tabela(zf, nomes, tabela)
+        if df is not None:
+            fato = fato.merge(_selecionar_valores(df, mapa), on=C.CHAVE, how="left")
+
+    # Concentração de cedentes (a partir dos percentuais por cedente da Tab. I)
+    conc = _concentracao_cedentes(base)
+    if conc is not None:
+        fato = fato.merge(conc, on=C.CHAVE, how="left")
+
+    inv = _processar_investidores(zf, nomes)
+    if inv is not None:
+        fato = fato.merge(inv, on=C.CHAVE, how="left")
+
+    return _derivar_fundo(fato)
+
+
+def _processar_investidores(zf, nomes) -> pd.DataFrame | None:
+    """nº de cotistas por tipo de investidor (tab_X_1_1, pós-Res.175).
+
+    Soma as parcelas sênior e subordinada de cada tipo num total por fundo-mês.
+    """
+    x11 = _ler_tabela(zf, nomes, "tab_X_1_1")
+    if x11 is None:
+        return None
+    out = x11[C.CHAVE].copy()
+    achou = False
+    for key in C.INVESTIDOR_TIPOS:
+        fontes = [f"TAB_X_NR_COTST_SENIOR_{key.upper()}",
+                  f"TAB_X_NR_COTST_SUBORD_{key.upper()}"]
+        fontes = [c for c in fontes if c in x11.columns]
+        if fontes:
+            achou = True
+            out[f"cotst_{key}"] = sum(
+                pd.to_numeric(x11[c], errors="coerce").fillna(0) for c in fontes)
+    if not achou:
+        return None
+    return out.drop_duplicates(subset=C.CHAVE, keep="last")
+
+
+def _concentracao_cedentes(base: pd.DataFrame) -> pd.DataFrame | None:
+    """Concentração de cedentes a partir dos % por cedente da Tabela I.
+
+    A CVM lista os maiores cedentes (com e sem risco) com seu percentual.
+    Derivamos: maior cedente (%), 5 maiores (%) e nº de cedentes nomeados.
+    """
+    pr_cols = [c for c in base.columns if re.search(r"PR_CEDENTE_\d+$", c)]
+    if not pr_cols:
+        return None
+    vals = base[pr_cols].apply(pd.to_numeric, errors="coerce")
+    vals = vals.where((vals >= 0) & (vals <= 100))   # descarta lixo (>100% etc.)
+    arr = np.sort(np.nan_to_num(vals.to_numpy(dtype=float), nan=0.0), axis=1)[:, ::-1]
+    sub = base[C.CHAVE].copy()
+    sub["cedente_top1_pct"] = arr[:, 0]
+    sub["cedente_top5_pct"] = arr[:, :5].sum(axis=1).clip(max=100)
+    sub["n_cedentes_nomeados"] = (vals > 0).sum(axis=1)
+    # top1 == 0 significa "sem cedente reportado" → NaN (não é concentração zero)
+    sub.loc[sub["cedente_top1_pct"] <= 0, ["cedente_top1_pct", "cedente_top5_pct"]] = np.nan
+    return sub.drop_duplicates(subset=C.CHAVE, keep="last")
+
+
+def _derivar_fundo(fato: pd.DataFrame) -> pd.DataFrame:
+    if fato.empty:
+        return fato
+    fato["dt_comptc"] = pd.to_datetime(fato["dt_comptc"], errors="coerce")
+    fato = fato.dropna(subset=["dt_comptc"])
+    fato["competencia"] = fato["dt_comptc"].dt.to_period("M").astype(str)
+    fato["ano"] = fato["dt_comptc"].dt.year
+
+    def soma(*cols):
+        existentes = [c for c in cols if c in fato.columns]
+        return fato[existentes].fillna(0).sum(axis=1) if existentes else 0.0
+
+    fato["vl_dircred"] = soma("vl_dircred_risco", "vl_dircred_sem_risco")
+    fato["vl_venc_inad"] = soma("vl_venc_inad_risco", "vl_venc_inad_sem_risco")
+    fato["vl_cred_inad"] = soma("vl_cred_inad_risco", "vl_cred_inad_sem_risco")
+    fato["vl_pdd"] = soma("vl_reducao_recup_risco", "vl_reducao_recup_sem_risco")
+
+    for col in ("condom", "fundo_exclusivo", "tp_fundo_classe", "admin", "denom_social"):
+        if col in fato.columns:
+            fato[col] = fato[col].astype("string").str.strip()
+    if "tp_fundo_classe" not in fato.columns:
+        fato["tp_fundo_classe"] = "Fundo"
+    fato["tp_fundo_classe"] = fato["tp_fundo_classe"].fillna("Fundo")
+    return fato
+
+
+# --------------------------------------------------------------------------- #
+# Fato série/cota-mês (senioridade)
+# --------------------------------------------------------------------------- #
+def _normaliza_serie(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["classe_serie"] = df[C.COL_SERIE].astype("string").str.strip()
+    return df
+
+
+def _processar_cotas(zf, nomes, fato_fundo: pd.DataFrame) -> pd.DataFrame:
+    x2 = _ler_tabela(zf, nomes, "tab_X_2")
+    if x2 is None or C.COL_SERIE not in x2.columns:
+        return pd.DataFrame()
+
+    chave_s = C.CHAVE + ["classe_serie"]
+    cotas = _selecionar_valores(_normaliza_serie(x2), C.TAB_X2_VALORES, chave_s)
+
+    # nº de cotistas, rentabilidade, desempenho
+    for tabela, mapa in [("tab_X_1", C.TAB_X1_VALORES),
+                         ("tab_X_3", C.TAB_X3_VALORES),
+                         ("tab_X_6", C.TAB_X6_VALORES)]:
+        df = _ler_tabela(zf, nomes, tabela)
+        if df is not None and C.COL_SERIE in df.columns:
+            cotas = cotas.merge(
+                _selecionar_valores(_normaliza_serie(df), mapa, chave_s),
+                on=chave_s, how="left")
+
+    # Fluxo (tab_X_4): pivota TP_OPER em colunas
+    x4 = _ler_tabela(zf, nomes, "tab_X_4")
+    if x4 is not None and {C.COL_SERIE, C.COL_TP_OPER, "TAB_X_VL_TOTAL"} <= set(x4.columns):
+        x4 = _normaliza_serie(x4)
+        x4["op"] = x4[C.COL_TP_OPER].map(C.classificar_operacao)
+        x4["vl"] = pd.to_numeric(x4["TAB_X_VL_TOTAL"], errors="coerce")
+        fluxo = (x4.dropna(subset=["op"])
+                 .groupby(chave_s + ["op"], as_index=False)["vl"].sum()
+                 .pivot_table(index=chave_s, columns="op", values="vl", aggfunc="sum")
+                 .reset_index())
+        fluxo.columns.name = None
+        cotas = cotas.merge(fluxo, on=chave_s, how="left")
+
+    return _derivar_cotas(cotas, fato_fundo)
+
+
+def _derivar_cotas(cotas: pd.DataFrame, fato_fundo: pd.DataFrame) -> pd.DataFrame:
+    if cotas.empty:
+        return cotas
+    cotas["dt_comptc"] = pd.to_datetime(cotas["dt_comptc"], errors="coerce")
+    cotas = cotas.dropna(subset=["dt_comptc"])
+    cotas["competencia"] = cotas["dt_comptc"].dt.to_period("M").astype(str)
+    cotas["senioridade"] = cotas["classe_serie"].map(C.classificar_senioridade)
+
+    # PL bruto da série = quantidade de cotas * valor da cota.
+    # ATENÇÃO: alguns fundos reportam qt_cota/vl_cota com erros grosseiros, então
+    # esse valor bruto é só um insumo para calcular a PROPORÇÃO por senioridade.
+    qt = cotas["qt_cota"].fillna(0) if "qt_cota" in cotas else 0
+    vl = cotas["vl_cota"].fillna(0) if "vl_cota" in cotas else 0
+    cotas["pl_serie"] = qt * vl
+
+    # Enriquece com atributos do fundo (para filtros consistentes no dashboard)
+    if not fato_fundo.empty:
+        attrs = (fato_fundo[["cnpj", "dt_comptc", "denom_social", "admin",
+                            "tp_fundo_classe", "condom", "fundo_exclusivo", "vl_pl"]]
+                 .drop_duplicates(subset=C.CHAVE))
+        cotas = cotas.merge(attrs, on=C.CHAVE, how="left")
+
+    # pl_aloc: PL REAL do fundo (tab_IV) rateado pela participação da série no fundo.
+    # Garante que a soma por senioridade sempre reproduza o PL de mercado correto,
+    # neutralizando outliers de qt/vl_cota de fundos isolados.
+    soma_fundo = cotas.groupby(C.CHAVE)["pl_serie"].transform("sum")
+    share = (cotas["pl_serie"] / soma_fundo).where(soma_fundo > 0)
+    if "vl_pl" in cotas:
+        cotas["pl_aloc"] = (cotas["vl_pl"] * share)
+        # Sem PL do fundo ou sem proporção válida: usa o bruto como fallback.
+        cotas["pl_aloc"] = cotas["pl_aloc"].fillna(cotas["pl_serie"])
+    else:
+        cotas["pl_aloc"] = cotas["pl_serie"]
+    return cotas
+
+
+def processar_zip(caminho_zip) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Lê um ZIP da CVM e devolve (fato_fundo, fato_cotas)."""
+    with zipfile.ZipFile(caminho_zip) as zf:
+        nomes = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+        fundo = _processar_fundo(zf, nomes)
+        cotas = _processar_cotas(zf, nomes, fundo)
+    return fundo, cotas
+
+
+# --------------------------------------------------------------------------- #
+# Consolidação
+# --------------------------------------------------------------------------- #
+def _carregar_manifest() -> dict:
+    if config.MANIFEST.exists():
+        return json.loads(config.MANIFEST.read_text(encoding="utf-8"))
+    return {}
+
+
+def _concatena_parts(parts_dir, chave: list[str], destino, verbose: bool):
+    parts = sorted(parts_dir.glob("*.parquet"))
+    if not parts:
+        return pd.DataFrame()
+    todos = pd.concat((pd.read_parquet(p) for p in parts), ignore_index=True)
+    todos = todos.sort_values("dt_comptc").drop_duplicates(subset=chave, keep="last")
+    todos = todos.reset_index(drop=True)
+    todos.to_parquet(destino, index=False)
+    return todos
+
+
+def consolidar(*, verbose: bool = True) -> None:
+    """Processa os ZIPs em parts e gera os dois parquets consolidados."""
+    config.ensure_dirs()
+    manifest = _carregar_manifest()
+
+    zips = sorted(config.RAW_DIR.glob("inf_mensal_fidc_*.zip"))
+    if verbose:
+        print(f"Processando {len(zips)} ZIP(s)...")
+
+    for z in zips:
+        part_f = config.PARTS_DIR / (z.stem + ".parquet")
+        part_c = config.PARTS_COTAS_DIR / (z.stem + ".parquet")
+        tam_atual = z.stat().st_size
+        tam_proc = manifest.get(z.name, {}).get("size_processed")
+        if part_f.exists() and part_c.exists() and tam_proc == tam_atual:
+            continue
+        try:
+            fundo, cotas = processar_zip(z)
+            if not fundo.empty:
+                fundo.to_parquet(part_f, index=False)
+            if not cotas.empty:
+                cotas.to_parquet(part_c, index=False)
+            manifest.setdefault(z.name, {})["size_processed"] = tam_atual
+            if verbose:
+                print(f"  [ok ] {z.name}: {len(fundo):,} fundos | {len(cotas):,} cotas")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [erro] {z.name}: {exc}")
+
+    config.MANIFEST.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    fundo = _concatena_parts(config.PARTS_DIR, C.CHAVE, config.CONSOLIDADO, verbose)
+    cotas = _concatena_parts(config.PARTS_COTAS_DIR, C.CHAVE + ["classe_serie"],
+                             config.CONSOLIDADO_COTAS, verbose)
+
+    if verbose and not fundo.empty:
+        print(f"\nFato fundo : {len(fundo):,} linhas | "
+              f"{fundo['competencia'].min()} a {fundo['competencia'].max()} | "
+              f"{fundo['cnpj'].nunique():,} CNPJs")
+    if verbose and not cotas.empty:
+        print(f"Fato cotas : {len(cotas):,} linhas | "
+              f"senioridades: {cotas['senioridade'].value_counts().to_dict()}")
+
+
+if __name__ == "__main__":
+    consolidar()

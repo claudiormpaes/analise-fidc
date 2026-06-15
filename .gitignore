@@ -1,0 +1,28 @@
+# Dados baixados/gerados (regeráveis via pipeline)
+data/raw/
+data/processed/
+data/pipeline.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / env
+.env
+*.env

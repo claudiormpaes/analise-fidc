@@ -1,0 +1,681 @@
+"""Dashboard de análise do mercado de FIDCs (CVM) — Streamlit, estilo Power BI.
+
+Rodar:  python -m streamlit run app.py
+Dados:  data/processed/fidc_consolidado.parquet  (fato fundo-mês)
+        data/processed/fidc_cotas.parquet        (fato série/cota-mês)
+Gere/atualize com:  python -m fidc.pipeline
+"""
+from __future__ import annotations
+
+from datetime import datetime
+
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+
+import config
+from fidc import columns as C
+
+st.set_page_config(page_title="FIDC Analytics — CVM", page_icon="📊", layout="wide")
+
+CORES = px.colors.qualitative.Safe
+COR_SEN = {"Sênior": "#2E7D32", "Mezanino": "#F9A825", "Subordinada": "#C62828",
+           "Única": "#1565C0", "Outra": "#9E9E9E"}
+ACCENT = "#2E7D32"
+
+# --------------------------------------------------------------------------- #
+# CSS — visual de cards/tiles tipo Power BI
+# --------------------------------------------------------------------------- #
+st.markdown("""
+<style>
+.block-container {padding-top: 1.6rem; padding-bottom: 1rem; max-width: 1500px;}
+section[data-testid="stSidebar"] {background: #F4F6FA;}
+.kpi-card {background:#fff;border:1px solid #E6E9EF;border-radius:14px;
+  padding:14px 16px;box-shadow:0 1px 3px rgba(16,24,40,.06);height:100%;}
+.kpi-label{font-size:.70rem;letter-spacing:.05em;text-transform:uppercase;
+  color:#667085;margin:0;font-weight:600;}
+.kpi-value{font-size:1.55rem;font-weight:700;color:#101828;margin:.15rem 0 0;line-height:1.1;}
+.kpi-delta{font-size:.80rem;margin-top:.2rem;font-weight:600;}
+.up{color:#2E7D32;} .down{color:#C62828;} .flat{color:#667085;}
+.slicer-box{background:#F4F6FA;border:1px solid #E6E9EF;border-radius:14px;padding:.4rem 1rem .8rem;}
+.chip{display:inline-block;background:#E8F5E9;color:#1B5E20;border:1px solid #66BB6A;
+  border-radius:16px;padding:3px 12px;font-size:.8rem;margin:2px 6px 2px 0;font-weight:600;}
+div[data-testid="stTabs"] button[role="tab"]{font-weight:600;}
+h1{font-size:1.7rem !important;}
+</style>
+""", unsafe_allow_html=True)
+
+
+# --------------------------------------------------------------------------- #
+# Carga
+# --------------------------------------------------------------------------- #
+@st.cache_data(show_spinner="Carregando base de fundos...")
+def carregar_fundos() -> pd.DataFrame:
+    if not config.CONSOLIDADO.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(config.CONSOLIDADO)
+    df["dt_comptc"] = pd.to_datetime(df["dt_comptc"])
+    return df
+
+
+@st.cache_data(show_spinner="Carregando base de cotas...")
+def carregar_cotas() -> pd.DataFrame:
+    if not config.CONSOLIDADO_COTAS.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(config.CONSOLIDADO_COTAS)
+    df["dt_comptc"] = pd.to_datetime(df["dt_comptc"])
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def carregar_cdi() -> pd.DataFrame:
+    if not config.CDI_MENSAL.exists():
+        return pd.DataFrame(columns=["competencia", "cdi_mes"])
+    return pd.read_parquet(config.CDI_MENSAL)
+
+
+def fmt_bi(v):
+    if v is None or pd.isna(v):
+        return "—"
+    return f"R$ {v / 1e9:,.1f} bi".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def fmt_pct(v):
+    if v is None or pd.isna(v):
+        return "—"
+    return f"{v * 100:,.2f}%".replace(".", ",")
+
+
+def fmt_int(v):
+    return f"{int(v):,}".replace(",", ".")
+
+
+def style_fig(fig, h=320):
+    """Tema unificado nos gráficos (look limpo tipo BI)."""
+    fig.update_layout(
+        template="plotly_white", height=h,
+        margin=dict(l=8, r=8, t=46, b=8),
+        font=dict(family="Segoe UI, Roboto, sans-serif", size=12, color="#1A1F2B"),
+        title_font=dict(size=14), hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0, title=""),
+        xaxis_title="", yaxis_title="",
+    )
+    return fig
+
+
+def card(label, value, delta_html=""):
+    return (f"<div class='kpi-card'><p class='kpi-label'>{label}</p>"
+            f"<p class='kpi-value'>{value}</p>{delta_html}</div>")
+
+
+def delta_pp(cur, prev, inverse=False):
+    """HTML de delta em pontos percentuais (para indicadores em %)."""
+    if cur is None or prev is None or pd.isna(cur) or pd.isna(prev):
+        return ""
+    d = (cur - prev) * 100
+    up = d >= 0
+    good = (not up) if inverse else up
+    arrow = "▲" if up else "▼"
+    cls = "up" if good else "down"
+    return f"<p class='kpi-delta {cls}'>{arrow} {abs(d):.2f} p.p.</p>".replace(".", ",")
+
+
+def delta_val(cur, prev):
+    if cur is None or prev is None or pd.isna(cur) or pd.isna(prev):
+        return ""
+    d = cur - prev
+    cls = "up" if d >= 0 else "down"
+    arrow = "▲" if d >= 0 else "▼"
+    return f"<p class='kpi-delta {cls}'>{arrow} {fmt_bi(abs(d))}</p>"
+
+
+df = carregar_fundos()
+dfc = carregar_cotas()
+if df.empty:
+    st.title("📊 FIDC Analytics")
+    st.warning("Base não gerada. Rode:\n\n```\npython -m fidc.pipeline\n```")
+    st.stop()
+
+# --------------------------------------------------------------------------- #
+# Sidebar — filtros "estáticos"
+# --------------------------------------------------------------------------- #
+st.sidebar.header("Filtros")
+comp_min, comp_max = df["dt_comptc"].min(), df["dt_comptc"].max()
+periodo = st.sidebar.slider(
+    "Período (séries temporais)",
+    min_value=comp_min.to_pydatetime(), max_value=comp_max.to_pydatetime(),
+    value=(comp_min.to_pydatetime(), comp_max.to_pydatetime()), format="MM/YYYY")
+busca = st.sidebar.text_input("🔎 Nome do fundo contém", "",
+                              placeholder="ex.: agro, consignado, XP...").strip()
+condoms = sorted(df["condom"].dropna().unique().tolist()) if "condom" in df else []
+sel_condom = st.sidebar.multiselect("Condomínio", condoms, default=condoms)
+excls = sorted(df["fundo_exclusivo"].dropna().unique().tolist()) if "fundo_exclusivo" in df else []
+sel_excl = st.sidebar.multiselect("Exclusivo", excls, default=excls)
+top_adm = (df.groupby("admin")["vl_pl"].sum().sort_values(ascending=False)
+           .head(50).index.tolist() if "admin" in df else [])
+sel_adm = st.sidebar.multiselect("Administrador", top_adm, default=[])
+st.sidebar.caption("💡 Clique numa barra do ranking de administradores para cruzar o painel.")
+
+# --------------------------------------------------------------------------- #
+# Barra de slicers (topo) — feel responsivo tipo Power BI
+# --------------------------------------------------------------------------- #
+st.title("📊 FIDC Analytics — mercado brasileiro de Direitos Creditórios")
+
+with st.container():
+    st.markdown("<div class='slicer-box'>", unsafe_allow_html=True)
+    s1, s2, s3 = st.columns([1.1, 1.1, 1.6])
+    with s1:
+        tipos = sorted(df["tp_fundo_classe"].dropna().unique().tolist())
+        sel_tipo = st.segmented_control("Tipo", tipos, selection_mode="multi",
+                                        default=tipos, key="sl_tipo") or tipos
+    with s2:
+        sen_opts = ([s for s in C.ORDEM_SENIORIDADE if s in dfc["senioridade"].unique()]
+                    if not dfc.empty else [])
+        sel_sen = st.segmented_control("Senioridade (cotas)", sen_opts, selection_mode="multi",
+                                       default=sen_opts, key="sl_sen") or sen_opts
+    with s3:
+        meses = sorted(m.to_pydatetime() for m in df["dt_comptc"].unique()
+                       if periodo[0] <= m.to_pydatetime() <= periodo[1])
+        ref_dt = st.select_slider(
+            "📅 Competência de referência (snapshots)", options=meses,
+            value=meses[-1], format_func=lambda d: d.strftime("%m/%Y"), key="sl_ref")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+ref_month = pd.Timestamp(ref_dt)
+
+# --------------------------------------------------------------------------- #
+# Cross-filter: administrador (clique no ranking)
+# --------------------------------------------------------------------------- #
+xf_admin = st.session_state.get("xf_admin")
+
+
+def aplica(d: pd.DataFrame) -> pd.DataFrame:
+    m = (d["dt_comptc"] >= pd.Timestamp(periodo[0])) & (d["dt_comptc"] <= pd.Timestamp(periodo[1]))
+    if busca:
+        m &= d["denom_social"].str.contains(busca, case=False, na=False)
+    if sel_tipo and "tp_fundo_classe" in d:
+        m &= d["tp_fundo_classe"].isin(sel_tipo)
+    if sel_condom and "condom" in d:
+        m &= d["condom"].isin(sel_condom)
+    if sel_excl and "fundo_exclusivo" in d:
+        m &= d["fundo_exclusivo"].isin(sel_excl)
+    if sel_adm and "admin" in d:
+        m &= d["admin"].isin(sel_adm)
+    if xf_admin and "admin" in d:
+        m &= d["admin"] == xf_admin
+    return d[m]
+
+
+dff = aplica(df)
+dffc_full = aplica(dfc) if not dfc.empty else pd.DataFrame()
+dffc = dffc_full[dffc_full["senioridade"].isin(sel_sen)] if not dffc_full.empty else dffc_full
+
+# Chips de filtros ativos
+chips = []
+if busca:
+    chips.append(f"nome ⊇ '{busca}'")
+if xf_admin:
+    chips.append(f"administrador = {xf_admin}")
+if sel_adm:
+    chips.append(f"adm: {len(sel_adm)} selec.")
+cinfo, cbtn = st.columns([6, 1])
+with cinfo:
+    atual = datetime.fromtimestamp(config.CONSOLIDADO.stat().st_mtime).strftime("%d/%m/%Y %H:%M")
+    st.caption(f"Fonte: Dados Abertos CVM · ref. **{ref_month:%m/%Y}** · "
+               f"atualizado em {atual}" +
+               ("&nbsp;&nbsp;" + " ".join(f"<span class='chip'>{c}</span>" for c in chips)
+                if chips else ""), unsafe_allow_html=True)
+with cbtn:
+    if (xf_admin or chips) and st.button("✖ Limpar", width="stretch"):
+        st.session_state.pop("xf_admin", None)
+        st.session_state["xf_key"] = st.session_state.get("xf_key", 0) + 1
+        st.rerun()
+
+if dff.empty:
+    st.warning("Nenhum registro com os filtros selecionados.")
+    st.stop()
+
+# --------------------------------------------------------------------------- #
+# Séries agregadas + estrutura de senioridade
+# --------------------------------------------------------------------------- #
+agg = dff.groupby("dt_comptc").agg(
+    pl=("vl_pl", "sum"), ativo=("vl_ativo", "sum"), dircred=("vl_dircred", "sum"),
+    venc_inad=("vl_venc_inad", "sum"), pdd=("vl_pdd", "sum"), n=("cnpj", "nunique"),
+).reset_index()
+agg["inad_pct"] = (agg["venc_inad"] / agg["dircred"]).where(agg["dircred"] > 0)
+agg["pdd_pct"] = (agg["pdd"].abs() / agg["dircred"]).where(agg["dircred"] > 0)
+
+if not dffc_full.empty:
+    pivot_sen = (dffc_full.groupby(["dt_comptc", "senioridade"])["pl_aloc"].sum()
+                 .unstack(fill_value=0))
+    sub_cols = [c for c in ["Subordinada", "Mezanino"] if c in pivot_sen]
+    agg = agg.merge((pivot_sen[sub_cols].sum(axis=1) / pivot_sen.sum(axis=1))
+                    .rename("subord_pct"), left_on="dt_comptc", right_index=True, how="left")
+    flow_cols = [c for c in ["captacao", "resgate"] if c in dffc_full.columns]
+    if flow_cols:
+        fl = dffc_full.groupby("dt_comptc")[flow_cols].sum()
+        fl["capt_liq"] = fl.get("captacao", 0) - fl.get("resgate", 0)
+        agg = agg.merge(fl["capt_liq"].reset_index(), on="dt_comptc", how="left")
+
+
+def linha_ref(a, dt):
+    """Linha do mês de referência e a anterior (para deltas)."""
+    a = a.sort_values("dt_comptc").reset_index(drop=True)
+    idx = a.index[a["dt_comptc"] == dt]
+    i = int(idx[0]) if len(idx) else len(a) - 1
+    return a.iloc[i], (a.iloc[i - 1] if i > 0 else a.iloc[i])
+
+
+cur, prev = linha_ref(agg, ref_month)
+
+# Aviso de mês parcial
+_cont = df.groupby("dt_comptc")["cnpj"].nunique()
+if ref_month == comp_max and len(_cont) > 1 and _cont.iloc[-1] < 0.85 * _cont.iloc[-2]:
+    st.info(f"⚠️ A competência **{comp_max:%m/%Y}** parece parcial "
+            f"({_cont.iloc[-1]} vs {_cont.iloc[-2]} fundos) — dentro do prazo de entrega à CVM.")
+
+# --------------------------------------------------------------------------- #
+# KPI cards
+# --------------------------------------------------------------------------- #
+kpis = [
+    card("Patrimônio Líquido", fmt_bi(cur["pl"]), delta_val(cur["pl"], prev["pl"])),
+    card("Fundos / Classes", fmt_int(cur["n"]),
+         f"<p class='kpi-delta {'up' if cur['n']>=prev['n'] else 'down'}'>"
+         f"{'▲' if cur['n']>=prev['n'] else '▼'} {int(abs(cur['n']-prev['n']))}</p>"),
+    card("Inadimplência", fmt_pct(cur["inad_pct"]),
+         delta_pp(cur["inad_pct"], prev["inad_pct"], inverse=True)),
+    card("Subordinação", fmt_pct(cur.get("subord_pct")),
+         delta_pp(cur.get("subord_pct"), prev.get("subord_pct"))),
+    card("Captação líq. (mês)", fmt_bi(cur.get("capt_liq"))),
+]
+for col, html in zip(st.columns(len(kpis)), kpis):
+    col.markdown(html, unsafe_allow_html=True)
+st.write("")
+
+# --------------------------------------------------------------------------- #
+# Abas
+# --------------------------------------------------------------------------- #
+T = st.tabs(["📈 Mercado", "🏗️ Estrutura de Cotas", "⚠️ Risco", "💰 Rentab. & Fluxo",
+             "🧩 Carteira", "🏆 Rankings", "🔎 Fundo", "👥 Investidores",
+             "🚨 Alertas", "📋 Dados"])
+
+with T[0]:
+    c1, c2 = st.columns(2)
+    fig = go.Figure()
+    fig.add_bar(x=agg["dt_comptc"], y=agg["pl"] / 1e9, name="PL (R$ bi)", marker_color=ACCENT)
+    fig.add_scatter(x=agg["dt_comptc"], y=agg["ativo"] / 1e9, name="Ativo (R$ bi)",
+                    line=dict(color="#90A4AE", width=2))
+    fig.add_vline(x=ref_month, line_dash="dot", line_color="#C62828")
+    c1.plotly_chart(style_fig(fig).update_layout(title="PL e Ativo total"),
+                    width="stretch")
+    fig2 = px.line(agg, x="dt_comptc", y="n", title="Nº de fundos/classes ativos")
+    fig2.update_traces(line_color=CORES[2])
+    fig2.add_vline(x=ref_month, line_dash="dot", line_color="#C62828")
+    c2.plotly_chart(style_fig(fig2), width="stretch")
+
+with T[1]:
+    if dffc_full.empty:
+        st.info("Base de cotas indisponível.")
+    else:
+        c1, c2 = st.columns([2, 1])
+        evol = dffc_full.groupby(["dt_comptc", "senioridade"])["pl_aloc"].sum().reset_index()
+        figa = px.area(evol, x="dt_comptc", y="pl_aloc", color="senioridade",
+                       color_discrete_map=COR_SEN, title="Evolução do PL por senioridade (R$)")
+        figa.add_vline(x=ref_month, line_dash="dot", line_color="#101828")
+        c1.plotly_chart(style_fig(figa, 360), width="stretch")
+        ultm = dffc_full[dffc_full["dt_comptc"] == ref_month]
+        pie = ultm.groupby("senioridade")["pl_aloc"].sum().reset_index()
+        figp = px.pie(pie, values="pl_aloc", names="senioridade", hole=0.55,
+                      color="senioridade", color_discrete_map=COR_SEN,
+                      title=f"Composição ({ref_month:%m/%Y})")
+        c2.plotly_chart(style_fig(figp, 360).update_layout(hovermode=None),
+                        width="stretch")
+        sub = (dffc_full[dffc_full.senioridade.isin(["Subordinada", "Mezanino"])]
+               .groupby("dt_comptc")["pl_aloc"].sum())
+        tot = dffc_full.groupby("dt_comptc")["pl_aloc"].sum()
+        figs = px.line((sub / tot * 100).rename("s").reset_index(), x="dt_comptc", y="s",
+                       title="Razão de subordinação do mercado (%)")
+        figs.update_traces(line_color=COR_SEN["Subordinada"])
+        figs.update_layout(yaxis_ticksuffix="%")
+        st.plotly_chart(style_fig(figs, 280), width="stretch")
+        st.caption("Subordinação = (Subordinada+Mezanino)/PL — colchão que protege a cota sênior.")
+
+with T[2]:
+    c1, c2 = st.columns(2)
+    figr = go.Figure()
+    figr.add_scatter(x=agg["dt_comptc"], y=agg["inad_pct"] * 100, name="Inadimplência %",
+                     line=dict(color="#C62828"))
+    figr.add_scatter(x=agg["dt_comptc"], y=agg["pdd_pct"] * 100, name="PDD/Carteira %",
+                     line=dict(color="#F9A825"))
+    figr.update_layout(title="Inadimplência e Provisão (% da carteira)", yaxis_ticksuffix="%")
+    c1.plotly_chart(style_fig(figr), width="stretch")
+    rating_cols = [c for c in C.TAB_X_RATING if c in dff.columns]
+    ultf = dff[dff["dt_comptc"] == ref_month]
+    rat = (ultf[rating_cols].sum().rename(lambda x: x.replace("rating_", "").upper())
+           if rating_cols else pd.Series(dtype=float))
+    if rat.sum() > 0:
+        figrt = px.bar(rat[rat > 0] / 1e9, title=f"Carteira por rating SCR ({ref_month:%m/%Y}) — R$ bi",
+                       color_discrete_sequence=[CORES[5]])
+        c2.plotly_chart(style_fig(figrt).update_layout(showlegend=False, hovermode=None),
+                        width="stretch")
+    else:
+        c2.info("Rating SCR disponível só a partir de 2023 (Res. CVM 175).")
+    ag = {l: ultf[c].sum() for c, l in {"vl_avencer": "A vencer", "vl_inadimplente": "Inadimplente",
+          "vl_antecipado": "Antecipado"}.items() if c in ultf}
+    if any(ag.values()):
+        figag = px.bar(x=list(ag), y=[v / 1e9 for v in ag.values()], color=list(ag),
+                       title=f"Direitos creditórios por situação ({ref_month:%m/%Y}) — R$ bi",
+                       color_discrete_sequence=[COR_SEN["Sênior"], COR_SEN["Subordinada"], "#90A4AE"])
+        st.plotly_chart(style_fig(figag, 280).update_layout(showlegend=False, hovermode=None),
+                        width="stretch")
+
+    # Concentração de cedentes (risco de contraparte)
+    if "cedente_top1_pct" in ultf.columns:
+        conc = ultf["cedente_top1_pct"].dropna()
+        if len(conc):
+            st.markdown("##### Concentração de cedentes (risco de contraparte)")
+            cc1, cc2 = st.columns([2, 1])
+            figh = px.histogram(conc, nbins=20, color_discrete_sequence=[CORES[3]],
+                                title=f"Distribuição da participação do maior cedente ({ref_month:%m/%Y})")
+            figh.update_layout(xaxis_ticksuffix="%", xaxis_title="% no maior cedente",
+                               yaxis_title="nº de fundos", bargap=0.05)
+            cc1.plotly_chart(style_fig(figh).update_layout(hovermode=None), width="stretch")
+            with cc2:
+                st.metric("Fundos que reportam cedentes", fmt_int(len(conc)))
+                st.metric("Maior cedente — mediana", f"{conc.median():.1f}%".replace(".", ","))
+                st.metric("Mono-cedente (≥90%)", fmt_int(int((conc >= 90).sum())))
+                top5 = ultf["cedente_top5_pct"].dropna()
+                if len(top5):
+                    st.metric("5 maiores — mediana", f"{top5.median():.1f}%".replace(".", ","))
+            st.caption("Quanto maior a participação de um único cedente, maior o risco de "
+                       "contraparte/originação. Disponível para os fundos que listam cedentes na Tab. I.")
+
+with T[3]:
+    if dffc.empty:
+        st.info("Base de cotas indisponível.")
+    else:
+        cdi = carregar_cdi()
+        # Só séries com rentabilidade REPORTADA (0 = não informado puxa a mediana p/ baixo)
+        rdf = dffc[dffc["rentab_mes"].notna() & (dffc["rentab_mes"] != 0)].copy()
+        rdf["rc"] = rdf["rentab_mes"].clip(-50, 50)
+        rmed = rdf.groupby(["dt_comptc", "senioridade"])["rc"].median().reset_index()
+        figr = px.line(rmed, x="dt_comptc", y="rc", color="senioridade",
+                       color_discrete_map=COR_SEN,
+                       title="Rentabilidade mensal mediana por senioridade vs CDI (%)")
+        if not cdi.empty:
+            cdi2 = cdi.copy()
+            cdi2["dt"] = pd.PeriodIndex(cdi2["competencia"], freq="M").to_timestamp(how="end").normalize()
+            cdi2 = cdi2[(cdi2["dt"] >= rmed["dt_comptc"].min()) & (cdi2["dt"] <= rmed["dt_comptc"].max())]
+            figr.add_scatter(x=cdi2["dt"], y=cdi2["cdi_mes"], name="CDI", mode="lines",
+                             line=dict(color="#101828", dash="dash", width=2))
+        figr.update_layout(yaxis_ticksuffix="%")
+        st.plotly_chart(style_fig(figr), width="stretch")
+
+        # Excesso de retorno da cota sênior vs CDI
+        if not cdi.empty:
+            sen = rmed[rmed["senioridade"] == "Sênior"].copy()
+            sen["competencia"] = sen["dt_comptc"].dt.to_period("M").astype(str)
+            sen = sen.merge(cdi, on="competencia", how="left")
+            sen["excesso"] = sen["rc"] - sen["cdi_mes"]
+            sen = sen.dropna(subset=["excesso"])
+            if not sen.empty:
+                exc12 = sen["excesso"].tail(12).mean()
+                st.metric("Excesso médio da cota sênior vs CDI (12m)",
+                          f"{exc12:+.2f} p.p./mês".replace(".", ","))
+                figx = go.Figure(go.Bar(
+                    x=sen["dt_comptc"], y=sen["excesso"],
+                    marker_color=[COR_SEN["Sênior"] if v >= 0 else COR_SEN["Subordinada"]
+                                  for v in sen["excesso"]]))
+                figx.add_hline(y=0, line_color="#667085")
+                figx.update_layout(title="Excesso de retorno da cota sênior vs CDI (p.p./mês)",
+                                   yaxis_ticksuffix=" pp")
+                st.plotly_chart(style_fig(figx, 260), width="stretch")
+
+        flx = dffc_full.groupby("dt_comptc").agg(
+            captacao=("captacao", "sum"), resgate=("resgate", "sum")).reset_index()
+        figf = go.Figure()
+        figf.add_bar(x=flx["dt_comptc"], y=flx["captacao"] / 1e9, name="Captações",
+                     marker_color=COR_SEN["Sênior"])
+        figf.add_bar(x=flx["dt_comptc"], y=-flx["resgate"] / 1e9, name="Resgates",
+                     marker_color=COR_SEN["Subordinada"])
+        figf.add_scatter(x=flx["dt_comptc"], y=(flx["captacao"] - flx["resgate"]) / 1e9,
+                         name="Líquido", line=dict(color="#101828", width=2))
+        figf.update_layout(title="Captações × Resgates (R$ bi)", barmode="relative")
+        st.plotly_chart(style_fig(figf), width="stretch")
+        st.caption("Rentabilidade = mediana das séries que reportam (exclui 0 = não informado), "
+                   "clip ±50%/mês. CDI mensal: BACEN/SGS série 4391.")
+
+with T[4]:
+    seg_cols = [c for c in C.ROTULOS_SEGMENTO if c in dff.columns]
+    ultf = dff[dff["dt_comptc"] == ref_month]
+    if seg_cols:
+        cs = ultf[seg_cols].sum().rename(index=C.ROTULOS_SEGMENTO).sort_values()
+        cs = cs[cs > 0]
+        figc = px.bar(cs / 1e9, orientation="h", color_discrete_sequence=[ACCENT],
+                      title=f"Carteira por segmento ({ref_month:%m/%Y}) — R$ bi")
+        st.plotly_chart(style_fig(figc, 360).update_layout(showlegend=False, hovermode=None),
+                        width="stretch")
+        evs = dff.groupby("dt_comptc")[seg_cols].sum().rename(columns=C.ROTULOS_SEGMENTO) / 1e9
+        fige = px.area(evs, title="Evolução por segmento (R$ bi)", color_discrete_sequence=CORES)
+        st.plotly_chart(style_fig(fige), width="stretch")
+
+with T[5]:
+    ultf = dff[dff["dt_comptc"] == ref_month]
+    if "admin" in ultf:
+        rk = (ultf.groupby("admin").agg(pl=("vl_pl", "sum"), fundos=("cnpj", "nunique"))
+              .sort_values("pl", ascending=False).head(15).reset_index())
+        figrk = px.bar(rk.sort_values("pl"), x="pl", y="admin", orientation="h",
+                       title=f"Top 15 administradores por PL ({ref_month:%m/%Y}) — clique p/ filtrar",
+                       color_discrete_sequence=[ACCENT])
+        figrk.update_layout(showlegend=False, hovermode=None, xaxis_title="PL (R$)")
+        key = f"xf_admin_chart_{st.session_state.get('xf_key', 0)}"
+        ev = st.plotly_chart(style_fig(figrk, 420), width="stretch",
+                             on_select="rerun", key=key)
+        try:
+            sel = (ev.get("selection") if isinstance(ev, dict) else None) or {}
+            pts = sel.get("points") or []
+            novo = pts[0].get("y") if pts else None
+            if novo and novo != xf_admin:
+                st.session_state["xf_admin"] = novo
+                st.rerun()
+        except Exception:
+            pass
+    rkf = (ultf.groupby("denom_social").agg(pl=("vl_pl", "sum"),
+           inad=("vl_venc_inad", "sum"), dc=("vl_dircred", "sum")).reset_index())
+    rkf["inad_pct"] = (rkf["inad"] / rkf["dc"]).where(rkf["dc"] > 0)
+    st.subheader(f"Maiores fundos por PL ({ref_month:%m/%Y})")
+    st.caption("Selecione uma linha para abrir o **drill-through** no deep-dive do fundo.")
+    rkt = (rkf.sort_values("pl", ascending=False).head(30)
+           .assign(pl=lambda d: (d["pl"] / 1e6).round(1))
+           .rename(columns={"denom_social": "Fundo/Classe", "pl": "PL (R$ mi)",
+                            "inad_pct": "Inad. %"})[["Fundo/Classe", "PL (R$ mi)", "Inad. %"]]
+           .reset_index(drop=True))
+    evr = st.dataframe(rkt.style.format({"Inad. %": "{:.2%}"}), width="stretch",
+                       hide_index=True, on_select="rerun", selection_mode="single-row",
+                       key="rk_tbl")
+    try:
+        linhas = (evr.get("selection", {}) if isinstance(evr, dict) else {}).get("rows", [])
+        if linhas:
+            fundo_drill = rkt.iloc[linhas[0]]["Fundo/Classe"]
+            st.success(f"**{fundo_drill}** selecionado.")
+            if st.button(f"🔎 Abrir deep-dive de «{fundo_drill[:60]}»", type="primary"):
+                st.session_state["ddfundo"] = fundo_drill
+                st.rerun()
+    except Exception:
+        pass
+
+with T[6]:
+    universo = sorted(dff["denom_social"].dropna().unique().tolist())
+    if not universo:
+        st.info("Nenhum fundo no filtro atual.")
+    else:
+        st.caption(f"{len(universo)} fundos no filtro. Use a busca por nome na barra lateral, "
+                   "ou clique numa linha do ranking (aba 🏆) para chegar aqui.")
+        # Se veio um fundo do drill-through e ele ainda está no universo, pré-seleciona.
+        if st.session_state.get("ddfundo") not in universo:
+            st.session_state.pop("ddfundo", None)
+        escolha = st.selectbox("Fundo/Classe", universo, key="ddfundo")
+        fsel = df[df["denom_social"] == escolha].sort_values("dt_comptc")
+        csel = dfc[dfc["denom_social"] == escolha].sort_values("dt_comptc") if not dfc.empty else pd.DataFrame()
+        u = fsel.iloc[-1]
+        st.markdown(f"#### {escolha}")
+        inad = (u["vl_venc_inad"] / u["vl_dircred"]) if u["vl_dircred"] else 0
+        cu = csel[csel["dt_comptc"] == u["dt_comptc"]] if not csel.empty else pd.DataFrame()
+        sub = cu[cu.senioridade.isin(["Subordinada", "Mezanino"])]["pl_aloc"].sum() if not cu.empty else 0
+        tot = cu["pl_aloc"].sum() if not cu.empty else 0
+        cot = int(cu["nr_cotistas"].fillna(0).sum()) if not cu.empty else 0
+        cards_f = [card("PL", fmt_bi(u["vl_pl"])), card("Ativo", fmt_bi(u["vl_ativo"])),
+                   card("Inadimplência", fmt_pct(inad)),
+                   card("Subordinação", fmt_pct(sub / tot if tot else 0)),
+                   card("Cotistas", fmt_int(cot))]
+        for col, h in zip(st.columns(5), cards_f):
+            col.markdown(h, unsafe_allow_html=True)
+        ced = u.get("cedente_top1_pct")
+        ced_txt = (f" · Maior cedente: {ced:.0f}%" if pd.notna(ced) else "")
+        st.caption(f"CNPJ {u.get('cnpj','—')} · Adm: {u.get('admin','—')} · "
+                   f"{u.get('tp_fundo_classe','—')} · {u.get('condom','—')}{ced_txt} · "
+                   f"até {u['dt_comptc']:%m/%Y}")
+        c1, c2 = st.columns(2)
+        figpl = go.Figure()
+        figpl.add_scatter(x=fsel["dt_comptc"], y=fsel["vl_pl"] / 1e6, name="PL (R$ mi)",
+                          line=dict(color=ACCENT))
+        figpl.add_scatter(x=fsel["dt_comptc"],
+                          y=(fsel["vl_venc_inad"] / fsel["vl_dircred"] * 100).where(fsel["vl_dircred"] > 0),
+                          name="Inad. %", yaxis="y2", line=dict(color="#C62828"))
+        figpl.update_layout(title="PL e inadimplência", yaxis=dict(title="R$ mi"),
+                            yaxis2=dict(title="%", overlaying="y", side="right"))
+        c1.plotly_chart(style_fig(figpl), width="stretch")
+        if not csel.empty:
+            evs = csel.groupby(["dt_comptc", "senioridade"])["pl_aloc"].sum().reset_index()
+            figse = px.area(evs, x="dt_comptc", y="pl_aloc", color="senioridade",
+                            color_discrete_map=COR_SEN, title="PL por senioridade (R$)")
+            c2.plotly_chart(style_fig(figse), width="stretch")
+            cu2 = csel[csel["dt_comptc"] == csel["dt_comptc"].max()]
+            st.markdown("##### Séries/cotas na última competência")
+            st.dataframe(cu2[["classe_serie", "senioridade", "pl_aloc", "vl_cota", "rentab_mes", "nr_cotistas"]]
+                         .sort_values("pl_aloc", ascending=False)
+                         .assign(pl_aloc=lambda d: (d["pl_aloc"] / 1e6).round(2))
+                         .rename(columns={"classe_serie": "Série", "senioridade": "Senioridade",
+                                          "pl_aloc": "PL (R$ mi)", "vl_cota": "Valor cota",
+                                          "rentab_mes": "Rentab. %", "nr_cotistas": "Cotistas"}),
+                         width="stretch", hide_index=True)
+
+with T[7]:
+    cot_cols = [f"cotst_{k}" for k in C.INVESTIDOR_TIPOS if f"cotst_{k}" in dff.columns]
+    ultf = dff[dff["dt_comptc"] == ref_month]
+    if not cot_cols or float(ultf[cot_cols].fillna(0).to_numpy().sum()) == 0:
+        st.info("Cotistas por tipo de investidor disponíveis a partir de 2019 "
+                "(informe estruturado). Selecione uma competência mais recente.")
+    else:
+        c1, c2 = st.columns([3, 2])
+        tot = (ultf[cot_cols].sum()
+               .rename(lambda x: C.INVESTIDOR_TIPOS.get(x.replace("cotst_", ""), x)))
+        tot = tot[tot > 0].sort_values()
+        figi = px.bar(tot, orientation="h", color_discrete_sequence=[ACCENT],
+                      title=f"Nº de cotistas por tipo de investidor ({ref_month:%m/%Y})")
+        c1.plotly_chart(style_fig(figi, 430).update_layout(showlegend=False, hovermode=None),
+                        width="stretch")
+        with c2:
+            st.markdown("##### Investidores institucionais")
+            inst = {"EFPC (fundos de pensão)": "cotst_efpc", "RPPS (regime próprio)": "cotst_rpps",
+                    "EAPC (prev. aberta)": "cotst_eapc", "Seguradora": "cotst_segur",
+                    "Capitalização": "cotst_capitaliz", "Banco": "cotst_banco"}
+            idf = pd.DataFrame([{"Tipo": k, "Cotistas": int(ultf[v].sum())}
+                                for k, v in inst.items() if v in ultf])
+            st.dataframe(idf, width="stretch", hide_index=True)
+            st.metric("Total de contas de cotistas", fmt_int(ultf[cot_cols].sum().sum()))
+        evol = dff.groupby("dt_comptc")[cot_cols].sum().sum(axis=1).rename("cotistas").reset_index()
+        fige = px.area(evol, x="dt_comptc", y="cotistas",
+                       title="Evolução do total de contas de cotistas", color_discrete_sequence=[ACCENT])
+        st.plotly_chart(style_fig(fige, 280), width="stretch")
+        st.caption("Contas de cotistas por tipo (sênior + subordinado). Útil para ver a presença de "
+                   "investidores institucionais — fundos de pensão (EFPC), regimes próprios (RPPS) etc.")
+
+with T[8]:
+    st.markdown("##### 🚨 Radar de deterioração por fundo")
+    meses_disp = sorted(dff["dt_comptc"].unique())
+    if len(meses_disp) < 2:
+        st.info("Histórico insuficiente para gerar alertas.")
+    else:
+        idx = meses_disp.index(ref_month) if ref_month in meses_disp else len(meses_disp) - 1
+        base_dt = meses_disp[idx]
+        comp_dt = meses_disp[max(0, idx - 3)]
+        co = st.columns(3)
+        thr_inad = co[0].slider("Δ inadimplência ≥ (p.p.)", 1.0, 10.0, 2.0, 0.5)
+        thr_sub = co[1].slider("Queda de subordinação ≥ (p.p.)", 1.0, 10.0, 3.0, 0.5)
+        thr_pl = co[2].slider("Queda de PL ≥ (%)", 5.0, 60.0, 20.0, 5.0)
+        st.caption(f"Comparando **{base_dt:%m/%Y}** vs **{comp_dt:%m/%Y}** (≈3 meses).")
+
+        def _met(dt):
+            g = (dff[dff["dt_comptc"] == dt].groupby(["cnpj", "denom_social"])
+                 .agg(pl=("vl_pl", "sum"), vi=("vl_venc_inad", "sum"),
+                      dc=("vl_dircred", "sum")).reset_index())
+            # Denominador material (> R$ 1 mi) evita inadimplência explosiva em
+            # fundos com carteira de DC perto de zero (encerrando).
+            g["inad"] = (g["vi"] / g["dc"]).where(g["dc"] > 1e6)
+            if not dffc_full.empty:
+                sc = dffc_full[dffc_full["dt_comptc"] == dt]
+                sub = sc[sc.senioridade.isin(["Subordinada", "Mezanino"])].groupby("cnpj")["pl_aloc"].sum()
+                tt = sc.groupby("cnpj")["pl_aloc"].sum()
+                g = g.merge((sub / tt).rename("subord").reset_index(), on="cnpj", how="left")
+            return g
+
+        a, b = _met(base_dt), _met(comp_dt)
+        m = a.merge(b, on="cnpj", suffixes=("", "_ant"))
+        m = m[m["pl"] >= 1e6]  # ignora fundos minúsculos (ruído)
+        m["d_inad"] = (m["inad"] - m["inad_ant"]) * 100
+        m["d_pl"] = ((m["pl"] - m["pl_ant"]) / m["pl_ant"] * 100).where(m["pl_ant"] > 0)
+        m["d_sub"] = ((m["subord"] - m["subord_ant"]) * 100) if "subord" in m else pd.NA
+        f_inad = ((m["d_inad"] >= thr_inad) & (m["inad"] >= 0.05)).fillna(False)
+        f_sub = (m["d_sub"] <= -thr_sub).fillna(False) if "subord" in m else pd.Series(False, index=m.index)
+        f_pl = (m["d_pl"] <= -thr_pl).fillna(False)
+        m["sev"] = f_inad.astype(int) + f_sub.astype(int) + f_pl.astype(int)
+
+        def _motivos(i):
+            o = []
+            if f_inad[i]: o.append(f"inad +{m['d_inad'][i]:.1f}pp")
+            if f_sub[i]: o.append(f"subord {m['d_sub'][i]:.1f}pp")
+            if f_pl[i]: o.append(f"PL {m['d_pl'][i]:.0f}%")
+            return " · ".join(o)
+
+        al = m[m["sev"] > 0].copy()
+        st.metric("Fundos em alerta", f"{len(al)} de {len(m)}")
+        if al.empty:
+            st.success("Nenhum fundo dispara alertas com os critérios atuais. 🎉")
+        else:
+            al["Motivos"] = [_motivos(i) for i in al.index]
+            out = (al.sort_values(["sev", "d_inad"], ascending=[False, False])
+                   .assign(PL_mi=lambda d: (d["pl"] / 1e6).round(1),
+                           inad_pct=lambda d: d["inad"])
+                   .rename(columns={"denom_social": "Fundo/Classe", "PL_mi": "PL (R$ mi)",
+                                    "inad_pct": "Inad. %", "d_inad": "ΔInad (pp)",
+                                    "d_sub": "ΔSubord (pp)", "d_pl": "ΔPL (%)", "sev": "Sev."}))
+            cols = ["Fundo/Classe", "PL (R$ mi)", "Inad. %", "ΔInad (pp)",
+                    "ΔSubord (pp)", "ΔPL (%)", "Sev.", "Motivos"]
+            cols = [c for c in cols if c in out.columns]
+            st.dataframe(out[cols].head(50).style.format({
+                "Inad. %": "{:.1%}", "ΔInad (pp)": "{:+.1f}", "ΔSubord (pp)": "{:+.1f}",
+                "ΔPL (%)": "{:+.0f}"}, na_rep="—"), width="stretch", hide_index=True)
+            st.download_button("⬇️ Alertas (CSV)", out[cols].to_csv(index=False).encode("utf-8-sig"),
+                               f"fidc_alertas_{base_dt:%Y%m}.csv", "text/csv")
+        st.caption("Sinais de deterioração: alta da inadimplência, queda da subordinação (menos "
+                   "proteção da cota sênior) e/ou encolhimento do PL. Ajuste os limiares acima.")
+
+with T[9]:
+    st.subheader("Série agregada (por competência)")
+    tab = agg.copy()
+    tab["dt_comptc"] = tab["dt_comptc"].dt.strftime("%m/%Y")
+    st.dataframe(tab, width="stretch", hide_index=True)
+    cd = st.columns(2)
+    cd[0].download_button("⬇️ Série agregada (CSV)", tab.to_csv(index=False).encode("utf-8-sig"),
+                          "fidc_serie_agregada.csv", "text/csv", width="stretch")
+    if not dffc.empty:
+        exp = dffc[dffc["dt_comptc"] == ref_month][["denom_social", "classe_serie", "senioridade",
+              "pl_aloc", "vl_cota", "rentab_mes", "nr_cotistas", "admin"]]
+        cd[1].download_button(f"⬇️ Cotas {ref_month:%m/%Y} (CSV)",
+                              exp.to_csv(index=False).encode("utf-8-sig"),
+                              f"fidc_cotas_{ref_month:%Y%m}.csv", "text/csv", width="stretch")
+    st.caption("PL por senioridade = PL real do fundo (Tab. IV) rateado pela participação de cada série. "
+               "Inadimplência = vencidos não pagos ÷ carteira de DC. Rentabilidade = mediana. "
+               "Rating SCR e cotistas por investidor só a partir de 2023 (Res. CVM 175).")

@@ -726,11 +726,18 @@ with T[9]:  # 📊 Qualidade
         rows.append({"Campo": label, "Preenchidos": preench,
                      "Total": n_tot, "Completude": pct / 100, "Obs.": nota})
 
+    def _cor_completude(val):
+        if val >= 0.80:
+            return "background-color:#c6efce;color:#276221"
+        if val >= 0.50:
+            return "background-color:#ffeb9c;color:#9c5700"
+        return "background-color:#ffc7ce;color:#9c0006"
+
     qdf = pd.DataFrame(rows)
     st.dataframe(
         qdf.style
            .format({"Completude": "{:.1%}", "Preenchidos": "{:,}", "Total": "{:,}"})
-           .background_gradient(subset=["Completude"], cmap="RdYlGn", vmin=0, vmax=1),
+           .map(_cor_completude, subset=["Completude"]),
         width="stretch", hide_index=True,
     )
 

@@ -55,8 +55,9 @@ section[data-testid="stSidebar"] {background: #F4F6FA;}
   padding:14px 16px;box-shadow:0 1px 3px rgba(16,24,40,.06);height:100%;}
 .kpi-label{font-size:.70rem;letter-spacing:.05em;text-transform:uppercase;
   color:#667085;margin:0;font-weight:600;}
-.kpi-value{font-size:1.55rem;font-weight:700;color:#101828;margin:.15rem 0 0;line-height:1.1;}
-.kpi-delta{font-size:.80rem;margin-top:.2rem;font-weight:600;}
+.kpi-value{font-size:1.15rem;font-weight:700;color:#101828;margin:.15rem 0 0;
+  line-height:1.25;overflow-wrap:break-word;word-break:break-word;}
+.kpi-delta{font-size:.78rem;margin-top:.2rem;font-weight:600;}
 .up{color:#2E7D32;} .down{color:#C62828;} .flat{color:#667085;}
 .slicer-box{background:#F4F6FA;border:1px solid #E6E9EF;border-radius:14px;padding:.4rem 1rem .8rem;}
 .chip{display:inline-block;background:#E8F5E9;color:#1B5E20;border:1px solid #66BB6A;
@@ -321,7 +322,7 @@ st.write("")
 # --------------------------------------------------------------------------- #
 T = st.tabs(["📈 Mercado", "🏗️ Estrutura de Cotas", "⚠️ Risco", "💰 Rentab. & Fluxo",
              "🧩 Carteira", "🏆 Rankings", "🔎 Fundo", "👥 Investidores",
-             "🚨 Alertas", "📋 Dados"])
+             "🚨 Alertas", "📊 Qualidade", "📋 Dados"])
 
 with T[0]:
     c1, c2 = st.columns(2)
@@ -685,7 +686,69 @@ with T[8]:
         st.caption("Sinais de deterioração: alta da inadimplência, queda da subordinação (menos "
                    "proteção da cota sênior) e/ou encolhimento do PL. Ajuste os limiares acima.")
 
-with T[9]:
+with T[9]:  # 📊 Qualidade
+    ultf = dff[dff["dt_comptc"] == ref_month]
+    n_tot = len(ultf)
+    st.markdown(f"#### Completude dos dados — competência **{ref_month:%m/%Y}** ({n_tot} registros)")
+    st.caption(
+        "Campos estruturalmente ausentes em certas datas têm explicação na última seção. "
+        "Completude = fração de registros com valor preenchido (não nulo)."
+    )
+
+    def _completude(cols):
+        cols = [c for c in (cols if isinstance(cols, list) else [cols]) if c in ultf.columns]
+        if not cols or n_tot == 0:
+            return 0, 0
+        preench = int(ultf[cols].notna().all(axis=1).sum())
+        return preench, preench / n_tot * 100
+
+    _seg_cols = [c for c in C.ROTULOS_SEGMENTO if c in ultf.columns]
+    _rat_cols = [c for c in C.TAB_X_RATING if c in ultf.columns]
+    _cot_cols = [f"cotst_{k}" for k in C.INVESTIDOR_TIPOS if f"cotst_{k}" in ultf.columns]
+
+    checks = [
+        ("Identificação (CNPJ, nome, admin)", ["cnpj", "denom_social", "admin"], "Sempre disponível"),
+        ("Tipo / condomínio / exclusivo",      ["tp_fundo_classe", "condom", "fundo_exclusivo"], "Sempre disponível"),
+        ("PL (vl_pl)",                          "vl_pl",        "Sempre disponível"),
+        ("Ativo total (vl_ativo)",              "vl_ativo",     "Sempre disponível"),
+        ("Carteira DC (vl_dircred)",            "vl_dircred",   "Disponível para fundos com crédito"),
+        ("Vencidos/Inad (vl_venc_inad)",        "vl_venc_inad", "Disponível para fundos com DC"),
+        ("PDD / Provisão (vl_pdd)",             "vl_pdd",       "Disponível para fundos com DC"),
+        ("Segmentos (Tab. II)",                 _seg_cols,      "Disponível para a maioria dos fundos"),
+        ("Rating SCR (Tab. X — AA→H)",          _rat_cols,      "Apenas a partir de 2023 (Res. CVM 175)"),
+        ("Cotistas por tipo (Tab. X.1.1)",      _cot_cols,      "Apenas a partir de 2019"),
+        ("Conc. cedentes (maior / top-5)",      ["cedente_top1_pct", "cedente_top5_pct"], "Apenas fundos que listam cedentes"),
+    ]
+
+    rows = []
+    for label, cols, nota in checks:
+        preench, pct = _completude(cols)
+        rows.append({"Campo": label, "Preenchidos": preench,
+                     "Total": n_tot, "Completude": pct / 100, "Obs.": nota})
+
+    qdf = pd.DataFrame(rows)
+    st.dataframe(
+        qdf.style
+           .format({"Completude": "{:.1%}", "Preenchidos": "{:,}", "Total": "{:,}"})
+           .background_gradient(subset=["Completude"], cmap="RdYlGn", vmin=0, vmax=1),
+        width="stretch", hide_index=True,
+    )
+
+    st.markdown("---")
+    st.markdown("##### Por que certos campos têm baixa completude?")
+    st.markdown("""
+- **Rating SCR (AA→H):** introduzido pela Resolução CVM 175 em 2023. Fundos constituídos antes e que
+  não migraram para o novo marco não reportam essa tabela.
+- **Cotistas por tipo de investidor:** disponível apenas no informe estruturado (a partir de 2019).
+  Competências mais antigas simplesmente não possuem esse campo na fonte CVM.
+- **Concentração de cedentes:** informada somente pelos fundos que listam individualmente seus cedentes
+  na Tab. I. Fundos monocrédito ou com muitos cedentes frequentemente omitem esse campo.
+- **Segmentos:** fundos em encerramento ou com carteira 100% líquida podem não preencher a Tab. II.
+- **Carteira DC / Inadimplência / PDD:** FIDCs que detêm apenas ativos financeiros (ex.: CRI, CRA,
+  debêntures dentro de uma estrutura híbrida) podem reportar DC ≈ 0, tornando os ratios indefinidos.
+""")
+
+with T[10]:
     st.subheader("Série agregada (por competência)")
     tab = agg.copy()
     tab["dt_comptc"] = tab["dt_comptc"].dt.strftime("%m/%Y")

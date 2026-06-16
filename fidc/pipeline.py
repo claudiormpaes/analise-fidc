@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from fidc import benchmarks, downloader, processor
+from fidc import benchmarks, carteira, downloader, processor
 
 
 def run(*, verbose: bool = True) -> None:
@@ -13,17 +13,27 @@ def run(*, verbose: bool = True) -> None:
         print("PIPELINE FIDC — sincronizando com o Portal de Dados Abertos CVM")
         print("=" * 60)
 
+    # Informe Mensal de FIDC
     baixados = downloader.sincronizar(verbose=verbose)
     if verbose:
         print(f"\n{len(baixados)} arquivo(s) novo(s)/atualizado(s).\n")
 
     processor.consolidar(verbose=verbose)
 
-    # Benchmark CDI (best-effort: não derruba o pipeline se a API estiver fora)
+    # Benchmarks (best-effort — não derruba o pipeline se APIs estiverem fora)
+    for nome, fn in [("CDI", benchmarks.fetch_cdi),
+                     ("IPCA", benchmarks.fetch_ipca),
+                     ("SELIC", benchmarks.fetch_selic)]:
+        try:
+            fn(verbose=verbose)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [aviso] {nome} não atualizado: {exc}")
+
+    # CDA — Composição de carteira (best-effort)
     try:
-        benchmarks.fetch_cdi(verbose=verbose)
+        carteira.sincronizar(verbose=verbose)
     except Exception as exc:  # noqa: BLE001
-        print(f"  [aviso] CDI não atualizado: {exc}")
+        print(f"  [aviso] CDA carteira não atualizado: {exc}")
 
     if verbose:
         print(f"\nConcluído em {time.time() - inicio:.1f}s.")

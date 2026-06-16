@@ -23,7 +23,8 @@ import pathlib, sys
 api = HfApi()
 base = pathlib.Path(r'$PSScriptRoot\data\processed')
 erros = []
-for f in ['fidc_consolidado.parquet', 'fidc_cotas.parquet', 'cdi_mensal.parquet']:
+for f in ['fidc_consolidado.parquet', 'fidc_cotas.parquet', 'cdi_mensal.parquet',
+          'ipca_mensal.parquet', 'selic_mensal.parquet', 'fidc_carteira.parquet']:
     p = base / f
     if not p.exists():
         print(f'AVISO: {f} nao encontrado, pulando')

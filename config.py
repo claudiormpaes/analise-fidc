@@ -19,6 +19,9 @@ PARTS_COTAS_DIR = PROCESSED_DIR / "parts_cotas"  # parquet por ZIP (fato cotas)
 CONSOLIDADO = PROCESSED_DIR / "fidc_consolidado.parquet"        # fato fundo-mês
 CONSOLIDADO_COTAS = PROCESSED_DIR / "fidc_cotas.parquet"        # fato série/cota-mês
 CDI_MENSAL = PROCESSED_DIR / "cdi_mensal.parquet"              # benchmark CDI (BACEN SGS)
+IPCA_MENSAL = PROCESSED_DIR / "ipca_mensal.parquet"            # IPCA mensal (BACEN SGS 433)
+SELIC_MENSAL = PROCESSED_DIR / "selic_mensal.parquet"          # SELIC mensal (BACEN SGS 4189)
+CARTEIRA = PROCESSED_DIR / "fidc_carteira.parquet"             # CDA: composição de carteira
 MANIFEST = RAW_DIR / "manifest.json"  # controle de download/processamento
 
 # --- Fonte de dados: Portal de Dados Abertos da CVM ---
@@ -26,12 +29,23 @@ MANIFEST = RAW_DIR / "manifest.json"  # controle de download/processamento
 BASE_URL = "https://dados.cvm.gov.br/dados/FIDC/DOC/INF_MENSAL/DADOS"
 HIST_URL = f"{BASE_URL}/HIST"
 
+# Composição e Diversificação de Aplicações (CDA) — todos os fundos, filtrar FIDC
+CDA_URL = "https://dados.cvm.gov.br/dados/FI/DOC/CDA/DADOS"
+CDA_HIST_URL = f"{CDA_URL}/HIST"
+
+# Cadastro de fundos e registro de fundo/classe da CVM
+CAD_URL = "https://dados.cvm.gov.br/dados/FI/CAD/DADOS/cad_fi.csv"
+REG_URL = "https://dados.cvm.gov.br/dados/FI/CAD/DADOS/registro_fundo_classe.zip"
+
 # Primeiro ano disponível no histórico anual da CVM
 PRIMEIRO_ANO_HIST = 2013
 
 # Arquivos mensais (DADOS/) dos últimos N meses são reprocessados pela CVM
 # semanalmente (reenvios). Mantemos esses sempre atualizados no download diário.
 JANELA_REFRESH_MESES = 13
+
+# Meses de CDA a processar (últimos N meses mensais)
+CDA_MESES = 30
 
 # Encoding e separador dos CSVs da CVM
 CSV_ENCODING = "latin-1"

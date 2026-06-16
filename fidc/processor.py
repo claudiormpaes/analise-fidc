@@ -325,6 +325,46 @@ def consolidar(*, verbose: bool = True) -> None:
     cotas = _concatena_parts(config.PARTS_COTAS_DIR, C.CHAVE + ["classe_serie"],
                              config.CONSOLIDADO_COTAS, verbose)
 
+    # Enriquece com gestor e metadados do cadastro CVM (best-effort)
+    if not fundo.empty:
+        try:
+            import re as _re
+            from fidc.benchmarks import fetch_cadastro
+
+            def _norm(s: str) -> str:
+                d = _re.sub(r"\D", "", str(s))
+                return d.zfill(14) if d else ""
+
+            cad = fetch_cadastro(verbose=verbose)
+            if not cad.empty:
+                cad["_cn"] = cad["cnpj"].apply(_norm)
+                fundo["_cn"] = fundo["cnpj"].apply(_norm)
+                # Remove colunas que serão recarregadas (evita duplicatas em re-runs)
+                _meta_cols = [c for c in ["gestor", "classe_anbima",
+                                          "taxa_adm", "taxa_perfm", "sit"]
+                              if c in fundo.columns]
+                if _meta_cols:
+                    fundo = fundo.drop(columns=_meta_cols)
+                _cad_cols = ["_cn"] + [c for c in ["gestor", "classe_anbima",
+                                                    "taxa_adm", "taxa_perfm", "sit"]
+                                       if c in cad.columns]
+                fundo = (fundo.merge(cad[_cad_cols], on="_cn", how="left")
+                         .drop(columns=["_cn"]))
+
+                # Cotas: só gestor (para filtro) — _cn ainda está em cad
+                if not cotas.empty:
+                    if "gestor" in cotas.columns:
+                        cotas = cotas.drop(columns=["gestor"])
+                    cotas["_cn"] = cotas["cnpj"].apply(_norm)
+                    cotas = (cotas.merge(cad[["_cn", "gestor"]], on="_cn", how="left")
+                             .drop(columns=["_cn"]))
+
+                fundo.to_parquet(config.CONSOLIDADO, index=False)
+                if not cotas.empty:
+                    cotas.to_parquet(config.CONSOLIDADO_COTAS, index=False)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [aviso] Metadados não enriquecidos: {exc}")
+
     if verbose and not fundo.empty:
         print(f"\nFato fundo : {len(fundo):,} linhas | "
               f"{fundo['competencia'].min()} a {fundo['competencia'].max()} | "

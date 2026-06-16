@@ -99,6 +99,30 @@ def carregar_cdi() -> pd.DataFrame:
     return pd.read_parquet(config.CDI_MENSAL)
 
 
+@st.cache_data(show_spinner=False)
+def carregar_ipca() -> pd.DataFrame:
+    _garantir_dados_hf(config.IPCA_MENSAL, "ipca_mensal.parquet")
+    if not config.IPCA_MENSAL.exists():
+        return pd.DataFrame(columns=["competencia", "ipca_mes"])
+    return pd.read_parquet(config.IPCA_MENSAL)
+
+
+@st.cache_data(show_spinner=False)
+def carregar_selic() -> pd.DataFrame:
+    _garantir_dados_hf(config.SELIC_MENSAL, "selic_mensal.parquet")
+    if not config.SELIC_MENSAL.exists():
+        return pd.DataFrame(columns=["competencia", "selic_mes"])
+    return pd.read_parquet(config.SELIC_MENSAL)
+
+
+@st.cache_data(show_spinner=False)
+def carregar_carteira() -> pd.DataFrame:
+    _garantir_dados_hf(config.CARTEIRA, "fidc_carteira.parquet")
+    if not config.CARTEIRA.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(config.CARTEIRA)
+
+
 def fmt_bi(v):
     if v is None or pd.isna(v):
         return "—"
@@ -156,6 +180,7 @@ def delta_val(cur, prev):
 
 df = carregar_fundos()
 dfc = carregar_cotas()
+dfcart = carregar_carteira()
 if df.empty:
     st.title("📊 FIDC Analytics")
     st.warning("Base não gerada. Rode:\n\n```\npython -m fidc.pipeline\n```")
@@ -179,6 +204,12 @@ sel_excl = st.sidebar.multiselect("Exclusivo", excls, default=excls)
 top_adm = (df.groupby("admin")["vl_pl"].sum().sort_values(ascending=False)
            .head(50).index.tolist() if "admin" in df else [])
 sel_adm = st.sidebar.multiselect("Administrador", top_adm, default=[])
+top_gest = (df.groupby("gestor")["vl_pl"].sum().sort_values(ascending=False)
+            .head(80).index.tolist() if "gestor" in df.columns else [])
+sel_gest = st.sidebar.multiselect("Gestor", top_gest, default=[])
+anbima_opts = (sorted(df["classe_anbima"].dropna().unique().tolist())
+               if "classe_anbima" in df.columns else [])
+sel_anbima = st.sidebar.multiselect("Classificação ANBIMA", anbima_opts, default=[])
 st.sidebar.caption("💡 Clique numa barra do ranking de administradores para cruzar o painel.")
 
 # --------------------------------------------------------------------------- #
@@ -226,6 +257,10 @@ def aplica(d: pd.DataFrame) -> pd.DataFrame:
         m &= d["fundo_exclusivo"].isin(sel_excl)
     if sel_adm and "admin" in d:
         m &= d["admin"].isin(sel_adm)
+    if sel_gest and "gestor" in d.columns:
+        m &= d["gestor"].isin(sel_gest)
+    if sel_anbima and "classe_anbima" in d.columns:
+        m &= d["classe_anbima"].isin(sel_anbima)
     if xf_admin and "admin" in d:
         m &= d["admin"] == xf_admin
     return d[m]
@@ -243,6 +278,10 @@ if xf_admin:
     chips.append(f"administrador = {xf_admin}")
 if sel_adm:
     chips.append(f"adm: {len(sel_adm)} selec.")
+if sel_gest:
+    chips.append(f"gestor: {', '.join(sel_gest[:2])}" + (" …" if len(sel_gest) > 2 else ""))
+if sel_anbima:
+    chips.append(f"anbima: {', '.join(sel_anbima[:2])}" + (" …" if len(sel_anbima) > 2 else ""))
 cinfo, cbtn = st.columns([6, 1])
 with cinfo:
     atual = datetime.fromtimestamp(config.CONSOLIDADO.stat().st_mtime).strftime("%d/%m/%Y %H:%M")
@@ -321,7 +360,7 @@ st.write("")
 # Abas
 # --------------------------------------------------------------------------- #
 T = st.tabs(["📈 Mercado", "🏗️ Estrutura de Cotas", "⚠️ Risco", "💰 Rentab. & Fluxo",
-             "🧩 Carteira", "🏆 Rankings", "🔎 Fundo", "👥 Investidores",
+             "🧩 Carteira", "💼 Portfólio CDA", "🏆 Rankings", "🔎 Fundo", "👥 Investidores",
              "🚨 Alertas", "📊 Qualidade", "📋 Dados"])
 
 with T[0]:
@@ -420,37 +459,59 @@ with T[3]:
         st.info("Base de cotas indisponível.")
     else:
         cdi = carregar_cdi()
+        ipca = carregar_ipca()
+        selic = carregar_selic()
         # Só séries com rentabilidade REPORTADA (0 = não informado puxa a mediana p/ baixo)
         rdf = dffc[dffc["rentab_mes"].notna() & (dffc["rentab_mes"] != 0)].copy()
         rdf["rc"] = rdf["rentab_mes"].clip(-50, 50)
         rmed = rdf.groupby(["dt_comptc", "senioridade"])["rc"].median().reset_index()
         figr = px.line(rmed, x="dt_comptc", y="rc", color="senioridade",
                        color_discrete_map=COR_SEN,
-                       title="Rentabilidade mensal mediana por senioridade vs CDI (%)")
-        if not cdi.empty:
-            cdi2 = cdi.copy()
-            cdi2["dt"] = pd.PeriodIndex(cdi2["competencia"], freq="M").to_timestamp(how="end").normalize()
-            cdi2 = cdi2[(cdi2["dt"] >= rmed["dt_comptc"].min()) & (cdi2["dt"] <= rmed["dt_comptc"].max())]
-            figr.add_scatter(x=cdi2["dt"], y=cdi2["cdi_mes"], name="CDI", mode="lines",
-                             line=dict(color="#101828", dash="dash", width=2))
+                       title="Rentabilidade mensal mediana por senioridade vs benchmarks (%)")
+        def _add_benchmark(fig, bench_df, col, label, color, dash="dash"):
+            if bench_df.empty:
+                return
+            b = bench_df.copy()
+            b["dt"] = pd.PeriodIndex(b["competencia"], freq="M").to_timestamp(how="end").normalize()
+            b = b[(b["dt"] >= rmed["dt_comptc"].min()) & (b["dt"] <= rmed["dt_comptc"].max())]
+            fig.add_scatter(x=b["dt"], y=b[col], name=label, mode="lines",
+                            line=dict(color=color, dash=dash, width=2))
+        _add_benchmark(figr, cdi, "cdi_mes", "CDI", "#101828")
+        _add_benchmark(figr, selic, "selic_mes", "SELIC", "#455A64", "dot")
+        _add_benchmark(figr, ipca, "ipca_mes", "IPCA", "#E65100", "dashdot")
         figr.update_layout(yaxis_ticksuffix="%")
         st.plotly_chart(style_fig(figr), width="stretch")
 
-        # Excesso de retorno da cota sênior vs CDI
+        # Excesso de retorno da cota sênior vs CDI e IPCA
         if not cdi.empty:
             sen = rmed[rmed["senioridade"] == "Sênior"].copy()
             sen["competencia"] = sen["dt_comptc"].dt.to_period("M").astype(str)
             sen = sen.merge(cdi, on="competencia", how="left")
-            sen["excesso"] = sen["rc"] - sen["cdi_mes"]
-            sen = sen.dropna(subset=["excesso"])
+            if not ipca.empty:
+                sen = sen.merge(ipca, on="competencia", how="left")
+            if not selic.empty:
+                sen = sen.merge(selic, on="competencia", how="left")
+            sen["excesso_cdi"] = sen["rc"] - sen["cdi_mes"]
+            sen = sen.dropna(subset=["excesso_cdi"])
             if not sen.empty:
-                exc12 = sen["excesso"].tail(12).mean()
-                st.metric("Excesso médio da cota sênior vs CDI (12m)",
+                m1, m2, m3 = st.columns(3)
+                exc12 = sen["excesso_cdi"].tail(12).mean()
+                m1.metric("Excesso vs CDI (12m)",
                           f"{exc12:+.2f} p.p./mês".replace(".", ","))
+                if "ipca_mes" in sen.columns:
+                    sen["excesso_ipca"] = sen["rc"] - sen["ipca_mes"]
+                    exc_ipca = sen["excesso_ipca"].tail(12).mean()
+                    m2.metric("Excesso vs IPCA (12m)",
+                              f"{exc_ipca:+.2f} p.p./mês".replace(".", ","))
+                if "selic_mes" in sen.columns:
+                    sen["excesso_selic"] = sen["rc"] - sen["selic_mes"]
+                    exc_selic = sen["excesso_selic"].tail(12).mean()
+                    m3.metric("Excesso vs SELIC (12m)",
+                              f"{exc_selic:+.2f} p.p./mês".replace(".", ","))
                 figx = go.Figure(go.Bar(
-                    x=sen["dt_comptc"], y=sen["excesso"],
+                    x=sen["dt_comptc"], y=sen["excesso_cdi"],
                     marker_color=[COR_SEN["Sênior"] if v >= 0 else COR_SEN["Subordinada"]
-                                  for v in sen["excesso"]]))
+                                  for v in sen["excesso_cdi"]]))
                 figx.add_hline(y=0, line_color="#667085")
                 figx.update_layout(title="Excesso de retorno da cota sênior vs CDI (p.p./mês)",
                                    yaxis_ticksuffix=" pp")
@@ -484,52 +545,180 @@ with T[4]:
         fige = px.area(evs, title="Evolução por segmento (R$ bi)", color_discrete_sequence=CORES)
         st.plotly_chart(style_fig(fige), width="stretch")
 
-with T[5]:
-    ultf = dff[dff["dt_comptc"] == ref_month]
-    if "admin" in ultf:
-        rk = (ultf.groupby("admin").agg(pl=("vl_pl", "sum"), fundos=("cnpj", "nunique"))
-              .sort_values("pl", ascending=False).head(15).reset_index())
-        figrk = px.bar(rk.sort_values("pl"), x="pl", y="admin", orientation="h",
-                       title=f"Top 15 administradores por PL ({ref_month:%m/%Y}) — clique p/ filtrar",
-                       color_discrete_sequence=[ACCENT])
-        figrk.update_layout(showlegend=False, hovermode=None, xaxis_title="PL (R$)")
-        key = f"xf_admin_chart_{st.session_state.get('xf_key', 0)}"
-        ev = st.plotly_chart(style_fig(figrk, 420), width="stretch",
-                             on_select="rerun", key=key)
-        try:
-            sel = (ev.get("selection") if isinstance(ev, dict) else None) or {}
-            pts = sel.get("points") or []
-            novo = pts[0].get("y") if pts else None
-            if novo and novo != xf_admin:
-                st.session_state["xf_admin"] = novo
-                st.rerun()
-        except Exception:
-            pass
-    rkf = (ultf.groupby("denom_social").agg(pl=("vl_pl", "sum"),
-           inad=("vl_venc_inad", "sum"), dc=("vl_dircred", "sum")).reset_index())
-    rkf["inad_pct"] = (rkf["inad"] / rkf["dc"]).where(rkf["dc"] > 0)
-    st.subheader(f"Maiores fundos por PL ({ref_month:%m/%Y})")
-    st.caption("Selecione uma linha para abrir o **drill-through** no deep-dive do fundo.")
-    rkt = (rkf.sort_values("pl", ascending=False).head(30)
-           .assign(pl=lambda d: (d["pl"] / 1e6).round(1))
-           .rename(columns={"denom_social": "Fundo/Classe", "pl": "PL (R$ mi)",
-                            "inad_pct": "Inad. %"})[["Fundo/Classe", "PL (R$ mi)", "Inad. %"]]
-           .reset_index(drop=True))
-    evr = st.dataframe(rkt.style.format({"Inad. %": "{:.2%}"}), width="stretch",
-                       hide_index=True, on_select="rerun", selection_mode="single-row",
-                       key="rk_tbl")
-    try:
-        linhas = (evr.get("selection", {}) if isinstance(evr, dict) else {}).get("rows", [])
-        if linhas:
-            fundo_drill = rkt.iloc[linhas[0]]["Fundo/Classe"]
-            st.success(f"**{fundo_drill}** selecionado.")
-            if st.button(f"🔎 Abrir deep-dive de «{fundo_drill[:60]}»", type="primary"):
-                st.session_state["ddfundo"] = fundo_drill
-                st.rerun()
-    except Exception:
-        pass
+with T[5]:  # 💼 Portfólio CDA
+    st.markdown("#### Composição de Carteira por Tipo de Instrumento (CDA/CVM)")
+    st.caption(
+        "Fonte: Composição e Diversificação de Aplicações (CDA) — Portal Dados Abertos CVM. "
+        "Mostra o que cada FIDC detém além dos direitos creditórios (reservas, títulos, cotas etc.)."
+    )
+    if dfcart.empty:
+        st.info("Dados de carteira CDA não disponíveis. Rode `python -m fidc.pipeline` para gerar.")
+    else:
+        # Filtrar pelo universo de CNPJs do filtro ativo
+        cnpjs_filtro = set(dff["cnpj"].unique())
+        cart_f = dfcart[dfcart["cnpj"].isin(cnpjs_filtro)] if cnpjs_filtro else dfcart
+
+        # Visão agregada — período de referência
+        ref_comp = ref_month.to_period("M").strftime("%Y-%m")
+        cart_ref = cart_f[cart_f["competencia"] == ref_comp]
+
+        if cart_ref.empty:
+            # Usa competência mais próxima disponível
+            comps = sorted(cart_f["competencia"].unique())
+            if comps:
+                ref_comp = comps[-1]
+                cart_ref = cart_f[cart_f["competencia"] == ref_comp]
+            if cart_ref.empty:
+                st.info("Sem dados de CDA para o período selecionado.")
+                st.stop()
+
+        c1, c2 = st.columns([2, 1])
+        # Agregado por TP_APLIC
+        agg_aplic = (cart_ref.groupby("tp_aplic")["vl_posicao"].sum()
+                     .sort_values(ascending=False))
+        agg_aplic = agg_aplic[agg_aplic > 0]
+        if not agg_aplic.empty:
+            fig_aplic = px.bar(
+                agg_aplic / 1e9,
+                orientation="h",
+                title=f"Carteira por tipo de aplicação — {ref_comp} (R$ bi)",
+                color_discrete_sequence=[ACCENT],
+            )
+            c1.plotly_chart(
+                style_fig(fig_aplic, 380).update_layout(showlegend=False, hovermode=None),
+                width="stretch",
+            )
+            total = agg_aplic.sum()
+            pie_df = agg_aplic.reset_index()
+            pie_df.columns = ["Tipo", "Valor"]
+            fig_pie = px.pie(
+                pie_df, values="Valor", names="Tipo", hole=0.5,
+                title="Participação (%)",
+                color_discrete_sequence=CORES,
+            )
+            c2.plotly_chart(
+                style_fig(fig_pie, 380).update_layout(hovermode=None),
+                width="stretch",
+            )
+
+        # Evolução temporal do mix de carteira
+        evol_cart = (cart_f.groupby(["competencia", "tp_aplic"])["vl_posicao"]
+                     .sum().reset_index())
+        # Manter apenas top-8 tipos por volume total
+        top_tipos = (evol_cart.groupby("tp_aplic")["vl_posicao"].sum()
+                     .sort_values(ascending=False).head(8).index.tolist())
+        evol_cart = evol_cart[evol_cart["tp_aplic"].isin(top_tipos)]
+        if not evol_cart.empty:
+            evol_cart["dt"] = pd.PeriodIndex(evol_cart["competencia"], freq="M").to_timestamp()
+            fig_evol = px.area(
+                evol_cart, x="dt", y="vl_posicao", color="tp_aplic",
+                title="Evolução da composição de carteira CDA (R$)",
+                color_discrete_sequence=CORES,
+            )
+            st.plotly_chart(style_fig(fig_evol, 300), width="stretch")
+
+        # Top FIDCs na CDA por volume
+        top_fdcs = (cart_ref.groupby("cnpj")["vl_posicao"].sum()
+                    .sort_values(ascending=False).head(15).reset_index())
+        top_fdcs = top_fdcs.merge(
+            dff[["cnpj", "denom_social"]].drop_duplicates("cnpj"), on="cnpj", how="left")
+        if not top_fdcs.empty:
+            st.markdown(f"##### Top 15 FIDCs por posição CDA ({ref_comp})")
+            top_fdcs["PL CDA (R$ mi)"] = (top_fdcs["vl_posicao"] / 1e6).round(1)
+            st.dataframe(
+                top_fdcs[["denom_social", "PL CDA (R$ mi)"]].rename(
+                    columns={"denom_social": "Fundo/Classe"}),
+                width="stretch", hide_index=True,
+            )
 
 with T[6]:
+    ultf = dff[dff["dt_comptc"] == ref_month]
+    _rk_tabs = st.tabs(["Administradores", "Gestores", "Classe ANBIMA", "Maiores Fundos"])
+
+    with _rk_tabs[0]:
+        if "admin" in ultf.columns:
+            rk = (ultf.groupby("admin").agg(pl=("vl_pl", "sum"), fundos=("cnpj", "nunique"))
+                  .sort_values("pl", ascending=False).head(15).reset_index())
+            figrk = px.bar(rk.sort_values("pl"), x="pl", y="admin", orientation="h",
+                           title=f"Top 15 administradores por PL ({ref_month:%m/%Y}) — clique p/ filtrar",
+                           color_discrete_sequence=[ACCENT])
+            figrk.update_layout(showlegend=False, hovermode=None, xaxis_title="PL (R$)")
+            key = f"xf_admin_chart_{st.session_state.get('xf_key', 0)}"
+            ev = st.plotly_chart(style_fig(figrk, 420), width="stretch",
+                                 on_select="rerun", key=key)
+            try:
+                sel = (ev.get("selection") if isinstance(ev, dict) else None) or {}
+                pts = sel.get("points") or []
+                novo = pts[0].get("y") if pts else None
+                if novo and novo != xf_admin:
+                    st.session_state["xf_admin"] = novo
+                    st.rerun()
+            except Exception:
+                pass
+
+    with _rk_tabs[1]:
+        if "gestor" in ultf.columns:
+            rkg = (ultf.dropna(subset=["gestor"])
+                   .groupby("gestor").agg(pl=("vl_pl", "sum"), fundos=("cnpj", "nunique"))
+                   .sort_values("pl", ascending=False).head(15).reset_index())
+            if not rkg.empty:
+                figg = px.bar(rkg.sort_values("pl"), x="pl", y="gestor", orientation="h",
+                              title=f"Top 15 gestores por PL ({ref_month:%m/%Y})",
+                              color_discrete_sequence=[CORES[2]])
+                figg.update_layout(showlegend=False, hovermode=None, xaxis_title="PL (R$)")
+                st.plotly_chart(style_fig(figg, 420), width="stretch")
+                st.dataframe(rkg.assign(pl=lambda d: (d["pl"] / 1e9).round(2))
+                             .rename(columns={"gestor": "Gestor", "pl": "PL (R$ bi)",
+                                              "fundos": "Nº Fundos"}),
+                             width="stretch", hide_index=True)
+            else:
+                st.info("Dados de gestor não disponíveis. Rode o pipeline para enriquecer.")
+        else:
+            st.info("Dados de gestor não disponíveis. Rode o pipeline para enriquecer.")
+
+    with _rk_tabs[2]:
+        if "classe_anbima" in ultf.columns:
+            rka = (ultf.dropna(subset=["classe_anbima"])
+                   .groupby("classe_anbima").agg(pl=("vl_pl", "sum"), fundos=("cnpj", "nunique"))
+                   .sort_values("pl", ascending=False).reset_index())
+            if not rka.empty:
+                figa = px.bar(rka.sort_values("pl").tail(20), x="pl", y="classe_anbima",
+                              orientation="h",
+                              title=f"PL por Classe ANBIMA ({ref_month:%m/%Y})",
+                              color_discrete_sequence=[CORES[4]])
+                figa.update_layout(showlegend=False, hovermode=None, xaxis_title="PL (R$)")
+                st.plotly_chart(style_fig(figa, 480), width="stretch")
+            else:
+                st.info("Classificação ANBIMA não disponível. Rode o pipeline para enriquecer.")
+        else:
+            st.info("Classificação ANBIMA não disponível. Rode o pipeline para enriquecer.")
+
+    with _rk_tabs[3]:
+        rkf = (ultf.groupby("denom_social").agg(pl=("vl_pl", "sum"),
+               inad=("vl_venc_inad", "sum"), dc=("vl_dircred", "sum")).reset_index())
+        rkf["inad_pct"] = (rkf["inad"] / rkf["dc"]).where(rkf["dc"] > 0)
+        st.subheader(f"Maiores fundos por PL ({ref_month:%m/%Y})")
+        st.caption("Selecione uma linha para abrir o **drill-through** no deep-dive do fundo.")
+        rkt = (rkf.sort_values("pl", ascending=False).head(30)
+               .assign(pl=lambda d: (d["pl"] / 1e6).round(1))
+               .rename(columns={"denom_social": "Fundo/Classe", "pl": "PL (R$ mi)",
+                                "inad_pct": "Inad. %"})[["Fundo/Classe", "PL (R$ mi)", "Inad. %"]]
+               .reset_index(drop=True))
+        evr = st.dataframe(rkt.style.format({"Inad. %": "{:.2%}"}), width="stretch",
+                           hide_index=True, on_select="rerun", selection_mode="single-row",
+                           key="rk_tbl")
+        try:
+            linhas = (evr.get("selection", {}) if isinstance(evr, dict) else {}).get("rows", [])
+            if linhas:
+                fundo_drill = rkt.iloc[linhas[0]]["Fundo/Classe"]
+                st.success(f"**{fundo_drill}** selecionado.")
+                if st.button(f"🔎 Abrir deep-dive de «{fundo_drill[:60]}»", type="primary"):
+                    st.session_state["ddfundo"] = fundo_drill
+                    st.rerun()
+        except Exception:
+            pass
+
+with T[7]:
     universo = sorted(dff["denom_social"].dropna().unique().tolist())
     if not universo:
         st.info("Nenhum fundo no filtro atual.")
@@ -557,8 +746,17 @@ with T[6]:
             col.markdown(h, unsafe_allow_html=True)
         ced = u.get("cedente_top1_pct")
         ced_txt = (f" · Maior cedente: {ced:.0f}%" if pd.notna(ced) else "")
+        gest_txt = f" · Gestor: {u.get('gestor', '—')}" if u.get("gestor") else ""
+        anbima_txt = (f" · ANBIMA: {u.get('classe_anbima')}"
+                      if u.get("classe_anbima") and pd.notna(u.get("classe_anbima")) else "")
+        adm_tx = u.get("taxa_adm")
+        tx_txt = (f" · Taxa adm: {adm_tx:.4f}% a.a.".replace(".", ",")
+                  if pd.notna(adm_tx) else "")
+        sit_txt = (f" · Sit.: {u.get('sit')}"
+                   if u.get("sit") and pd.notna(u.get("sit")) else "")
         st.caption(f"CNPJ {u.get('cnpj','—')} · Adm: {u.get('admin','—')} · "
-                   f"{u.get('tp_fundo_classe','—')} · {u.get('condom','—')}{ced_txt} · "
+                   f"{u.get('tp_fundo_classe','—')} · {u.get('condom','—')}"
+                   f"{ced_txt}{gest_txt}{anbima_txt}{tx_txt}{sit_txt} · "
                    f"até {u['dt_comptc']:%m/%Y}")
         c1, c2 = st.columns(2)
         figpl = go.Figure()
@@ -585,7 +783,7 @@ with T[6]:
                                           "rentab_mes": "Rentab. %", "nr_cotistas": "Cotistas"}),
                          width="stretch", hide_index=True)
 
-with T[7]:
+with T[8]:
     cot_cols = [f"cotst_{k}" for k in C.INVESTIDOR_TIPOS if f"cotst_{k}" in dff.columns]
     ultf = dff[dff["dt_comptc"] == ref_month]
     if not cot_cols or float(ultf[cot_cols].fillna(0).to_numpy().sum()) == 0:
@@ -616,7 +814,7 @@ with T[7]:
         st.caption("Contas de cotistas por tipo (sênior + subordinado). Útil para ver a presença de "
                    "investidores institucionais — fundos de pensão (EFPC), regimes próprios (RPPS) etc.")
 
-with T[8]:
+with T[9]:
     st.markdown("##### 🚨 Radar de deterioração por fundo")
     meses_disp = sorted(dff["dt_comptc"].unique())
     if len(meses_disp) < 2:
@@ -686,7 +884,7 @@ with T[8]:
         st.caption("Sinais de deterioração: alta da inadimplência, queda da subordinação (menos "
                    "proteção da cota sênior) e/ou encolhimento do PL. Ajuste os limiares acima.")
 
-with T[9]:  # 📊 Qualidade
+with T[10]:  # 📊 Qualidade
     ultf = dff[dff["dt_comptc"] == ref_month]
     n_tot = len(ultf)
     st.markdown(f"#### Completude dos dados — competência **{ref_month:%m/%Y}** ({n_tot} registros)")
@@ -755,7 +953,7 @@ with T[9]:  # 📊 Qualidade
   debêntures dentro de uma estrutura híbrida) podem reportar DC ≈ 0, tornando os ratios indefinidos.
 """)
 
-with T[10]:
+with T[11]:
     st.subheader("Série agregada (por competência)")
     tab = agg.copy()
     tab["dt_comptc"] = tab["dt_comptc"].dt.strftime("%m/%Y")

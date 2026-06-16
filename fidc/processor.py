@@ -180,6 +180,20 @@ def _derivar_fundo(fato: pd.DataFrame) -> pd.DataFrame:
     if "tp_fundo_classe" not in fato.columns:
         fato["tp_fundo_classe"] = "Fundo"
     fato["tp_fundo_classe"] = fato["tp_fundo_classe"].fillna("Fundo")
+
+    # Outlier: vl_ativo/vl_pl > 50 indica erro de digitação na fonte CVM
+    # (ex.: AMERRA-LEAF jul/2020 reportou vlmob=R$966bi por engano; vl_pl correto ~R$12M)
+    # Nullify os campos contaminados; sub-componentes confiáveis (vl_dircred etc.) ficam.
+    if "vl_pl" in fato.columns and "vl_ativo" in fato.columns:
+        pl_pos = fato["vl_pl"].gt(0)
+        outlier = pl_pos & fato["vl_ativo"].gt(fato["vl_pl"] * 50)
+        if outlier.any():
+            n = int(outlier.sum())
+            print(f"  [aviso] {n} linha(s) com vl_ativo/vl_pl > 50× — corrigido para NaN (erro CVM)")
+            for col in ("vl_ativo", "vl_carteira", "vl_valores_mobiliarios"):
+                if col in fato.columns:
+                    fato.loc[outlier, col] = np.nan
+
     return fato
 
 

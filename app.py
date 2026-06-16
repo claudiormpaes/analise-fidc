@@ -223,7 +223,10 @@ _cnpj_raw = st.sidebar.text_area(
 import re as _re_cnpj
 
 def _norm_cnpj(s: str) -> str:
-    d = _re_cnpj.sub(r"\D", "", s).zfill(14)
+    d = _re_cnpj.sub(r"\D", "", s)
+    if not d:
+        return ""
+    d = d.zfill(14)
     return f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:14]}" if len(d) >= 14 else ""
 
 _cnpj_sep = _re_cnpj.split(r"[\n,;]+", _cnpj_raw.strip())

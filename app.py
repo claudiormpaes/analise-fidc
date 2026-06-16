@@ -210,6 +210,25 @@ sel_gest = st.sidebar.multiselect("Gestor", top_gest, default=[])
 anbima_opts = (sorted(df["classe_anbima"].dropna().unique().tolist())
                if "classe_anbima" in df.columns else [])
 sel_anbima = st.sidebar.multiselect("Classificação ANBIMA", anbima_opts, default=[])
+
+st.sidebar.markdown("---")
+_cnpj_raw = st.sidebar.text_area(
+    "📋 CNPJs para monitorar",
+    value="",
+    height=120,
+    placeholder="Cole um CNPJ por linha (com ou sem formatação):\n29.983.683/0001-26\n09195235000150\n...",
+    help="Filtra apenas os fundos cujos CNPJs estejam nesta lista. Aceita formato XX.XXX.XXX/XXXX-XX ou 14 dígitos.",
+)
+
+import re as _re_cnpj
+
+def _norm_cnpj(s: str) -> str:
+    d = _re_cnpj.sub(r"\D", "", s).zfill(14)
+    return f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:14]}" if len(d) >= 14 else ""
+
+_cnpj_sep = _re_cnpj.split(r"[\n,;]+", _cnpj_raw.strip())
+sel_cnpjs: set[str] = {c for raw in _cnpj_sep if (c := _norm_cnpj(raw.strip()))}
+
 st.sidebar.caption("💡 Clique numa barra do ranking de administradores para cruzar o painel.")
 
 # --------------------------------------------------------------------------- #
@@ -261,6 +280,8 @@ def aplica(d: pd.DataFrame) -> pd.DataFrame:
         m &= d["gestor"].isin(sel_gest)
     if sel_anbima and "classe_anbima" in d.columns:
         m &= d["classe_anbima"].isin(sel_anbima)
+    if sel_cnpjs and "cnpj" in d.columns:
+        m &= d["cnpj"].isin(sel_cnpjs)
     if xf_admin and "admin" in d:
         m &= d["admin"] == xf_admin
     return d[m]
@@ -282,6 +303,8 @@ if sel_gest:
     chips.append(f"gestor: {', '.join(sel_gest[:2])}" + (" …" if len(sel_gest) > 2 else ""))
 if sel_anbima:
     chips.append(f"anbima: {', '.join(sel_anbima[:2])}" + (" …" if len(sel_anbima) > 2 else ""))
+if sel_cnpjs:
+    chips.append(f"📋 {len(sel_cnpjs)} CNPJ(s) monitorado(s)")
 cinfo, cbtn = st.columns([6, 1])
 with cinfo:
     atual = datetime.fromtimestamp(config.CONSOLIDADO.stat().st_mtime).strftime("%d/%m/%Y %H:%M")

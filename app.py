@@ -310,7 +310,9 @@ if sel_cnpjs:
     chips.append(f"📋 {len(sel_cnpjs)} CNPJ(s) monitorado(s)")
 cinfo, cbtn = st.columns([6, 1])
 with cinfo:
-    atual = datetime.fromtimestamp(config.CONSOLIDADO.stat().st_mtime).strftime("%d/%m/%Y %H:%M")
+    from zoneinfo import ZoneInfo
+    _brt = ZoneInfo("America/Sao_Paulo")
+    atual = datetime.fromtimestamp(config.CONSOLIDADO.stat().st_mtime, tz=_brt).strftime("%d/%m/%Y %H:%M")
     st.caption(f"Fonte: Dados Abertos CVM · ref. **{ref_month:%m/%Y}** · "
                f"atualizado em {atual}" +
                ("&nbsp;&nbsp;" + " ".join(f"<span class='chip'>{c}</span>" for c in chips)

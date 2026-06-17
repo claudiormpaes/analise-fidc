@@ -15,7 +15,7 @@ import config
 # --- BACEN SGS ---
 SGS_CDI_MENSAL = 4391    # CDI acumulado no mês (% a.m.)
 SGS_IPCA_MENSAL = 433    # IPCA variação mensal (%)
-SGS_SELIC_MENSAL = 4189  # SELIC acumulada no mês (% a.m.)
+SGS_SELIC_MENSAL = 4189  # SELIC acumulada no mês (% a.a. — convertida para a.m. em fetch_selic)
 
 _SGS_URL = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{}/dados?formato=json"
 
@@ -64,9 +64,13 @@ def fetch_ipca(*, verbose: bool = True) -> pd.DataFrame:
 
 
 def fetch_selic(*, verbose: bool = True) -> pd.DataFrame:
-    """Baixa a SELIC mensal acumulada (SGS 4189) e salva em selic_mensal.parquet."""
+    """Baixa a SELIC (SGS 4189, % a.a.), converte para % a.m. e salva em selic_mensal.parquet."""
     config.ensure_dirs()
-    return _fetch_sgs(SGS_SELIC_MENSAL, "selic_mes", config.SELIC_MENSAL, verbose=verbose)
+    df = _fetch_sgs(SGS_SELIC_MENSAL, "selic_mes", config.SELIC_MENSAL, verbose=verbose)
+    # SGS 4189 retorna taxa anualizada; converte para mensal equivalente
+    df["selic_mes"] = ((1 + df["selic_mes"] / 100) ** (1 / 12) - 1) * 100
+    df.to_parquet(config.SELIC_MENSAL, index=False)
+    return df
 
 
 # --------------------------------------------------------------------------- #

@@ -232,6 +232,22 @@ def _norm_cnpj(s: str) -> str:
 _cnpj_sep = _re_cnpj.split(r"[\n,;]+", _cnpj_raw.strip())
 sel_cnpjs: set[str] = {c for raw in _cnpj_sep if (c := _norm_cnpj(raw.strip()))}
 
+st.sidebar.markdown("---")
+# FIDC-IE: a CVM não publica esse campo; identificação por palavras-chave no nome
+_PAT_INFRA = _re_cnpj.compile(
+    r"\bINFRAESTRUTURA\b|\bINFRA\b|SANEAMENTO|RODOVIA|FERROVIA|"
+    r"AEROPORTO|\bPORTO\b|TRANSMISS|\bENERGIA\b|HIDRELET|ESGOTO|"
+    r"FIDC[\s\-]IE\b",
+    _re_cnpj.IGNORECASE,
+)
+_infra_opts = ["Todos", "Infraestrutura (IE)", "Não Infraestrutura"]
+sel_infra = st.sidebar.radio(
+    "Segmento Infra",
+    _infra_opts,
+    index=0,
+    help="Identifica FIDC de Infraestrutura por palavras-chave no nome (INFRAESTRUTURA, SANEAMENTO, ENERGIA, RODOVIA, etc.). A CVM não publica esse campo diretamente.",
+)
+
 st.sidebar.caption("💡 Clique numa barra do ranking de administradores para cruzar o painel.")
 
 # --------------------------------------------------------------------------- #
@@ -285,6 +301,9 @@ def aplica(d: pd.DataFrame) -> pd.DataFrame:
         m &= d["classe_anbima"].isin(sel_anbima)
     if sel_cnpjs and "cnpj" in d.columns:
         m &= d["cnpj"].isin(sel_cnpjs)
+    if sel_infra != "Todos" and "denom_social" in d.columns:
+        is_infra = d["denom_social"].str.contains(_PAT_INFRA, na=False)
+        m &= is_infra if sel_infra == "Infraestrutura (IE)" else ~is_infra
     if xf_admin and "admin" in d:
         m &= d["admin"] == xf_admin
     return d[m]
@@ -308,6 +327,8 @@ if sel_anbima:
     chips.append(f"anbima: {', '.join(sel_anbima[:2])}" + (" …" if len(sel_anbima) > 2 else ""))
 if sel_cnpjs:
     chips.append(f"📋 {len(sel_cnpjs)} CNPJ(s) monitorado(s)")
+if sel_infra != "Todos":
+    chips.append(sel_infra)
 cinfo, cbtn = st.columns([6, 1])
 with cinfo:
     from zoneinfo import ZoneInfo

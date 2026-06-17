@@ -1,0 +1,92 @@
+name: Deploy HF Space
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app.py"
+      - "config.py"
+      - "fidc/**"
+      - "requirements.txt"
+      - "Dockerfile"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar huggingface_hub
+        run: pip install huggingface_hub
+
+      - name: Enviar código ao HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'EOF'
+          import os, pathlib, sys
+          from huggingface_hub import HfApi
+
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          repo_id = "claudiormpaes/analise-fidc"
+
+          arquivos = [
+              "app.py",
+              "config.py",
+              "fidc/__init__.py",
+              "fidc/benchmarks.py",
+              "fidc/carteira.py",
+              "fidc/columns.py",
+              "fidc/downloader.py",
+              "fidc/pipeline.py",
+              "fidc/processor.py",
+              "requirements.txt",
+          ]
+
+          erros = []
+          for f in arquivos:
+              p = pathlib.Path(f)
+              if not p.exists():
+                  print(f"AVISO: {f} não encontrado, pulando")
+                  continue
+              try:
+                  api.upload_file(
+                      path_or_fileobj=str(p),
+                      path_in_repo=f,
+                      repo_id=repo_id,
+                      repo_type="space",
+                      commit_message=f"Deploy: {f}",
+                  )
+                  print(f"OK: {f}")
+              except Exception as e:
+                  print(f"ERRO {f}: {e}")
+                  erros.append(f)
+
+          if erros:
+              print(f"Falha em {len(erros)} arquivo(s): {erros}")
+              sys.exit(1)
+          EOF
+
+      - name: Reiniciar HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'EOF'
+          import os
+          from huggingface_hub import HfApi
+          HfApi(token=os.environ["HF_TOKEN"]).restart_space("claudiormpaes/analise-fidc")
+          print("Space reiniciado.")
+          EOF

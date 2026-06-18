@@ -49,8 +49,9 @@ ACCENT = "#2E7D32"
 # --------------------------------------------------------------------------- #
 st.markdown("""
 <style>
-.block-container {padding-top: 1.6rem; padding-bottom: 1rem; max-width: 1500px;}
-section[data-testid="stSidebar"] {background: #F4F6FA;}
+/* ── Desktop ──────────────────────────────────────────────── */
+.block-container {padding-top:1.6rem;padding-bottom:1rem;max-width:1500px;}
+section[data-testid="stSidebar"] {background:#F4F6FA;}
 .kpi-card {background:#fff;border:1px solid #E6E9EF;border-radius:14px;
   padding:14px 16px;box-shadow:0 1px 3px rgba(16,24,40,.06);height:100%;}
 .kpi-label{font-size:.70rem;letter-spacing:.05em;text-transform:uppercase;
@@ -59,11 +60,62 @@ section[data-testid="stSidebar"] {background: #F4F6FA;}
   line-height:1.25;overflow-wrap:break-word;word-break:break-word;}
 .kpi-delta{font-size:.78rem;margin-top:.2rem;font-weight:600;}
 .up{color:#2E7D32;} .down{color:#C62828;} .flat{color:#667085;}
-.slicer-box{background:#F4F6FA;border:1px solid #E6E9EF;border-radius:14px;padding:.4rem 1rem .8rem;}
+.slicer-box{background:#F4F6FA;border:1px solid #E6E9EF;border-radius:14px;
+  padding:.4rem 1rem .8rem;}
 .chip{display:inline-block;background:#E8F5E9;color:#1B5E20;border:1px solid #66BB6A;
   border-radius:16px;padding:3px 12px;font-size:.8rem;margin:2px 6px 2px 0;font-weight:600;}
 div[data-testid="stTabs"] button[role="tab"]{font-weight:600;}
 h1{font-size:1.7rem !important;}
+
+/* ── Mobile (≤ 768 px) ────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Espaçamento geral */
+  .block-container {
+    padding-top:.6rem !important;
+    padding-left:.5rem !important;
+    padding-right:.5rem !important;
+    max-width:100% !important;
+  }
+
+  /* Título */
+  h1 { font-size:1.1rem !important; }
+
+  /* KPI cards menores */
+  .kpi-card  { padding:8px 10px; border-radius:10px; }
+  .kpi-label { font-size:.60rem !important; }
+  .kpi-value { font-size:.92rem !important; }
+  .kpi-delta { font-size:.70rem !important; }
+
+  /* Slicer box */
+  .slicer-box { padding:.2rem .5rem .5rem; }
+
+  /* Abas: scroll horizontal em vez de quebrar linha */
+  div[data-testid="stTabs"] > div:first-child {
+    overflow-x: auto !important;
+    flex-wrap: nowrap !important;
+    -webkit-overflow-scrolling: touch;
+  }
+  div[data-testid="stTabs"] button[role="tab"] {
+    font-size:.72rem !important;
+    padding:4px 8px !important;
+    white-space: nowrap !important;
+  }
+
+  /* Colunas: deixa o Streamlit empilhar normalmente no mobile */
+  div[data-testid="column"] { min-width: 0 !important; }
+
+  /* Tabelas: scroll horizontal */
+  div[data-testid="stDataFrame"], div[data-testid="stTable"] {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Plotly: altura reduzida */
+  .js-plotly-plot .plotly { max-height: 280px; }
+
+  /* Evita overflow lateral */
+  body, .main { overflow-x: hidden !important; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -148,6 +200,12 @@ def style_fig(fig, h=320):
         title_font=dict(size=14), hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0, title=""),
         xaxis_title="", yaxis_title="",
+        # Responsivo: encolhe para caber em telas menores sem barra de scroll horizontal
+        autosize=True,
+    )
+    fig.update_layout(
+        xaxis=dict(tickfont=dict(size=10)),
+        yaxis=dict(tickfont=dict(size=10)),
     )
     return fig
 
@@ -259,7 +317,12 @@ st.sidebar.caption("💡 Clique numa barra do ranking de administradores para cr
 # --------------------------------------------------------------------------- #
 # Barra de slicers (topo) — feel responsivo tipo Power BI
 # --------------------------------------------------------------------------- #
-st.title("📊 FIDC Analytics — mercado brasileiro de Direitos Creditórios")
+st.markdown(
+    "<h1>📊 FIDC Analytics "
+    "<span style='font-size:.85em;font-weight:400;color:#667085'>"
+    "— mercado brasileiro de Direitos Creditórios</span></h1>",
+    unsafe_allow_html=True,
+)
 
 with st.container():
     st.markdown("<div class='slicer-box'>", unsafe_allow_html=True)

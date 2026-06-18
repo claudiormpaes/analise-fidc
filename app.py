@@ -312,6 +312,27 @@ if sel_infra != "Todos":
         "refletir com precisão a classificação regulatória oficial."
     )
 
+st.sidebar.markdown("---")
+# Fundos de cota única: apenas 1 classe de senioridade no histórico de cotas
+@st.cache_data(show_spinner=False)
+def _cnpjs_cota_unica(dfc: pd.DataFrame) -> frozenset[str]:
+    if dfc.empty or "senioridade" not in dfc.columns:
+        return frozenset()
+    ativos = dfc[dfc["nr_cotistas"] > 0] if "nr_cotistas" in dfc.columns else dfc
+    n_classes = ativos.groupby("cnpj")["senioridade"].nunique()
+    return frozenset(n_classes[n_classes == 1].index)
+
+_cota_unica_cnpjs = _cnpjs_cota_unica(dfc)
+sel_excl_unica = st.sidebar.checkbox(
+    "Excluir FIDCs de cota única",
+    value=False,
+    help=(
+        "Remove fundos que têm apenas uma classe de cota (geralmente 'Subordinada' única). "
+        f"São {len(_cota_unica_cnpjs):,} fundos ({len(_cota_unica_cnpjs)/max(dfc['cnpj'].nunique(),1):.0%} do total). "
+        "Útil para focar na análise de sênior/mezanino vs subordinada."
+    ),
+)
+
 st.sidebar.caption("💡 Clique numa barra do ranking de administradores para cruzar o painel.")
 
 # --------------------------------------------------------------------------- #
@@ -373,6 +394,8 @@ def aplica(d: pd.DataFrame) -> pd.DataFrame:
     if sel_infra != "Todos" and "denom_social" in d.columns:
         is_infra = d["denom_social"].str.contains(_PAT_INFRA, na=False)
         m &= is_infra if sel_infra == "Infraestrutura (IE)" else ~is_infra
+    if sel_excl_unica and _cota_unica_cnpjs and "cnpj" in d.columns:
+        m &= ~d["cnpj"].isin(_cota_unica_cnpjs)
     if xf_admin and "admin" in d:
         m &= d["admin"] == xf_admin
     return d[m]
@@ -398,6 +421,8 @@ if sel_cnpjs:
     chips.append(f"📋 {len(sel_cnpjs)} CNPJ(s) monitorado(s)")
 if sel_infra != "Todos":
     chips.append(sel_infra)
+if sel_excl_unica:
+    chips.append("excl. cota única")
 cinfo, cbtn = st.columns([6, 1])
 with cinfo:
     from zoneinfo import ZoneInfo

@@ -245,8 +245,14 @@ sel_infra = st.sidebar.radio(
     "Segmento Infra",
     _infra_opts,
     index=0,
-    help="Identifica FIDC de Infraestrutura por palavras-chave no nome (INFRAESTRUTURA, SANEAMENTO, ENERGIA, RODOVIA, etc.). A CVM não publica esse campo diretamente.",
 )
+if sel_infra != "Todos":
+    st.sidebar.warning(
+        "⚠️ **Classificação aproximada.** A CVM não publica FIDC-IE como campo "
+        "estruturado. A segmentação é feita por palavras-chave no nome do fundo "
+        "(INFRAESTRUTURA, SANEAMENTO, ENERGIA, RODOVIA, PORTO etc.) e pode não "
+        "refletir com precisão a classificação regulatória oficial."
+    )
 
 st.sidebar.caption("💡 Clique numa barra do ranking de administradores para cruzar o painel.")
 

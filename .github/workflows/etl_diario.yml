@@ -28,6 +28,12 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Executar pipeline ETL
+        env:
+          # Proxy com IP brasileiro: a CVM bloqueia os IPs do GitHub Actions.
+          # Aplicado só às requisições CVM/BACEN (config.SESSION); os uploads ao
+          # HF abaixo seguem diretos. Configure o secret CVM_PROXY no repositório
+          # (ex.: http://user:senha@host:porta). Se vazio, roda sem proxy.
+          CVM_PROXY: ${{ secrets.CVM_PROXY }}
         run: python -m fidc.pipeline
 
       - name: Publicar parquets no HF Dataset

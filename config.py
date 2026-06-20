@@ -5,6 +5,7 @@ movido/copiado sem quebrar (importante por estar dentro do OneDrive).
 """
 from __future__ import annotations
 
+import os
 import socket
 from pathlib import Path
 
@@ -96,6 +97,17 @@ def _build_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
+
+    # Proxy opcional só para CVM/BACEN. A CVM (dados.cvm.gov.br) bloqueia os IPs
+    # de datacenter do GitHub Actions (a conexão expira por timeout), então no CI
+    # roteamos estas requisições por um proxy com IP brasileiro. Definido SOMENTE
+    # nesta Session — assim os uploads ao Hugging Face seguem diretos, sem passar
+    # pelo proxy. Defina o secret/variável de ambiente CVM_PROXY
+    # (ex.: http://user:senha@host:porta) no workflow do ETL.
+    proxy = os.environ.get("CVM_PROXY", "").strip()
+    if proxy:
+        session.proxies = {"http": proxy, "https": proxy}
+        session.trust_env = False  # ignora HTTP(S)_PROXY do ambiente; usa só este
     return session
 
 

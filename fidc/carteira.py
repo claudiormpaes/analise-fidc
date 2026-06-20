@@ -14,7 +14,6 @@ import re
 import zipfile
 
 import pandas as pd
-import requests
 
 import config
 
@@ -27,7 +26,7 @@ _COLUNAS = [
 
 def _listar_meses() -> list[str]:
     """Retorna lista de meses disponíveis (AAAAMM) no portal CVM."""
-    resp = requests.get(config.CDA_URL, headers=config.HTTP_HEADERS, timeout=30)
+    resp = config.SESSION.get(config.CDA_URL, timeout=30)
     resp.raise_for_status()
     meses = sorted(re.findall(r"cda_fi_(\d{6})\.zip", resp.text))
     return meses[-config.CDA_MESES:]
@@ -36,7 +35,7 @@ def _listar_meses() -> list[str]:
 def _processar_zip(mes: str) -> pd.DataFrame:
     """Baixa cda_fi_AAAAMM.zip, filtra FIDCs e devolve tabela agregada."""
     url = f"{config.CDA_URL}/cda_fi_{mes}.zip"
-    resp = requests.get(url, headers=config.HTTP_HEADERS, timeout=180)
+    resp = config.SESSION.get(url, timeout=180)
     resp.raise_for_status()
 
     nome_fie = f"cda_fie_{mes}.csv"

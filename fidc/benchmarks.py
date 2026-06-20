@@ -8,7 +8,6 @@ import re
 import zipfile
 
 import pandas as pd
-import requests
 
 import config
 
@@ -27,7 +26,7 @@ _CAD_TIPOS_FIDC = {"FIDC", "FIC FIDC", "FIC-FIDC"}
 # Helpers
 # --------------------------------------------------------------------------- #
 def _fetch_sgs(serie: int, col: str, parquet_path, *, verbose: bool) -> pd.DataFrame:
-    resp = requests.get(_SGS_URL.format(serie), headers=config.HTTP_HEADERS, timeout=60)
+    resp = config.SESSION.get(_SGS_URL.format(serie), timeout=60)
     resp.raise_for_status()
     d = pd.DataFrame(resp.json())
     d["data"] = pd.to_datetime(d["data"], format="%d/%m/%Y")
@@ -87,7 +86,7 @@ def fetch_cadastro(*, verbose: bool = True) -> pd.DataFrame:
         # ------------------------------------------------------------------ #
         # 1. registro_fundo_classe.zip: classe CNPJ → gestor do fundo pai
         # ------------------------------------------------------------------ #
-        resp = requests.get(config.REG_URL, headers=config.HTTP_HEADERS, timeout=120)
+        resp = config.SESSION.get(config.REG_URL, timeout=120)
         resp.raise_for_status()
 
         with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
@@ -129,7 +128,7 @@ def fetch_cadastro(*, verbose: bool = True) -> pd.DataFrame:
         # ------------------------------------------------------------------ #
         # 2. cad_fi.csv: ANBIMA, taxas, sit para fundos (pré-Res.175)
         # ------------------------------------------------------------------ #
-        resp2 = requests.get(config.CAD_URL, headers=config.HTTP_HEADERS, timeout=60)
+        resp2 = config.SESSION.get(config.CAD_URL, timeout=60)
         resp2.raise_for_status()
         cad = pd.read_csv(
             io.StringIO(resp2.content.decode("latin-1")),

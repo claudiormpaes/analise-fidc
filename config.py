@@ -7,6 +7,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 # Raiz do projeto (pasta onde este arquivo está)
 ROOT = Path(__file__).resolve().parent
 
@@ -53,6 +57,39 @@ CSV_SEP = ";"
 
 # User-Agent para as requisições (alguns servidores recusam sem header)
 HTTP_HEADERS = {"User-Agent": "analise-fidc/1.0 (+pipeline CVM dados abertos)"}
+
+# --- Cliente HTTP resiliente ---
+# O Portal de Dados Abertos da CVM (dados.cvm.gov.br) é instável: o ETL diário
+# já falhou logo na primeira requisição com ConnectionError
+# ("[Errno 101] Network is unreachable"). Usamos uma Session com retry e
+# backoff exponencial para que oscilações momentâneas da CVM/BACEN não
+# derrubem a pipeline inteira. Use config.SESSION.get/head no lugar de
+# requests.get/head em todo o projeto.
+HTTP_MAX_RETRIES = 5
+HTTP_BACKOFF_FACTOR = 1.5  # espera 0s, 1.5s, 3s, 6s, 12s entre as tentativas
+
+
+def _build_session() -> requests.Session:
+    """Session com retry em erros de conexão, timeout de leitura e 5xx/429."""
+    retry = Retry(
+        total=HTTP_MAX_RETRIES,
+        connect=HTTP_MAX_RETRIES,
+        read=HTTP_MAX_RETRIES,
+        status=HTTP_MAX_RETRIES,
+        backoff_factor=HTTP_BACKOFF_FACTOR,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET", "HEAD"}),
+        raise_on_status=False,  # deixa o raise_for_status() do caller decidir
+    )
+    session = requests.Session()
+    session.headers.update(HTTP_HEADERS)
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+SESSION = _build_session()
 
 
 def ensure_dirs() -> None:

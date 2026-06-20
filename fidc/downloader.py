@@ -29,7 +29,7 @@ class RemoteFile:
 
 def _listar_diretorio(url: str) -> list[str]:
     """Lê o índice HTML de um diretório do portal e devolve os nomes de .zip."""
-    resp = requests.get(url, headers=config.HTTP_HEADERS, timeout=60)
+    resp = config.SESSION.get(url, timeout=60)
     resp.raise_for_status()
     return sorted(set(re.findall(r"inf_mensal_fidc_\d{4,6}\.zip", resp.text)))
 
@@ -60,7 +60,7 @@ def descobrir_arquivos() -> list[RemoteFile]:
 def _tamanho_remoto(url: str) -> int | None:
     """Content-Length do arquivo remoto (None se o servidor não informar)."""
     try:
-        resp = requests.head(url, headers=config.HTTP_HEADERS, timeout=60, allow_redirects=True)
+        resp = config.SESSION.head(url, timeout=60, allow_redirects=True)
         resp.raise_for_status()
         tam = resp.headers.get("Content-Length")
         return int(tam) if tam is not None else None
@@ -105,7 +105,7 @@ def baixar(rf: RemoteFile, manifest: dict, *, verbose: bool = True) -> bool:
 
     if verbose:
         print(f"  [get ] {rf.nome}")
-    resp = requests.get(rf.url, headers=config.HTTP_HEADERS, timeout=300, stream=True)
+    resp = config.SESSION.get(rf.url, timeout=300, stream=True)
     resp.raise_for_status()
     tmp = destino.with_suffix(".zip.part")
     with open(tmp, "wb") as fh:

@@ -5,11 +5,21 @@ movido/copiado sem quebrar (importante por estar dentro do OneDrive).
 """
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 import requests
+import urllib3.util.connection as _urllib3_conn
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+# Força IPv4 em todas as conexões HTTP do projeto.
+# Desde ~19/06/2026 o dados.cvm.gov.br passou a publicar registro AAAA (IPv6),
+# mas os runners do GitHub Actions não têm rota IPv6. Sem isto, o urllib3 tenta
+# o endereço IPv6 primeiro e falha de imediato com "[Errno 101] Network is
+# unreachable" — causa real das falhas do ETL diário (o retry não ajuda porque
+# repete o mesmo IPv6 inalcançável). O IPv4 da CVM (45.7.170.66) é acessível.
+_urllib3_conn.allowed_gai_family = lambda: socket.AF_INET
 
 # Raiz do projeto (pasta onde este arquivo está)
 ROOT = Path(__file__).resolve().parent

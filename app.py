@@ -123,6 +123,33 @@ h1{font-size:1.7rem !important;}
 # --------------------------------------------------------------------------- #
 # Carga
 # --------------------------------------------------------------------------- #
+# Colunas de texto usadas em groupby de MÚLTIPLAS chaves: mantê-las como texto
+# evita o produto cartesiano de categorias no groupby (que aumentaria a memória).
+_NAO_CATEGORIZAR = {"senioridade", "tp_aplic"}
+
+
+def _otimizar_memoria(df: pd.DataFrame) -> pd.DataFrame:
+    """Reduz o uso de memória SEM alterar os valores exibidos:
+      - texto muito repetido  -> category   (economiza 60-80% naquelas colunas)
+      - inteiros              -> menor tipo que couber (lossless)
+      - float64               -> float32    (~7 dígitos significativos; sobra
+                                  para os valores em R$ bi/% deste painel)
+    """
+    if df.empty:
+        return df
+    for col in df.select_dtypes(include="object").columns:
+        if col in _NAO_CATEGORIZAR:
+            continue
+        # só vale a pena quando há muita repetição (poucos valores distintos)
+        if df[col].nunique(dropna=False) < len(df) * 0.5:
+            df[col] = df[col].astype("category")
+    for col in df.select_dtypes(include="integer").columns:
+        df[col] = pd.to_numeric(df[col], downcast="integer")
+    for col in df.select_dtypes(include="float").columns:
+        df[col] = pd.to_numeric(df[col], downcast="float")
+    return df
+
+
 @st.cache_data(show_spinner="Carregando base de fundos...")
 def carregar_fundos() -> pd.DataFrame:
     _garantir_dados_hf(config.CONSOLIDADO, "fidc_consolidado.parquet")
@@ -130,7 +157,7 @@ def carregar_fundos() -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.read_parquet(config.CONSOLIDADO)
     df["dt_comptc"] = pd.to_datetime(df["dt_comptc"])
-    return df
+    return _otimizar_memoria(df)
 
 
 @st.cache_data(show_spinner="Carregando base de cotas...")
@@ -140,7 +167,7 @@ def carregar_cotas() -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.read_parquet(config.CONSOLIDADO_COTAS)
     df["dt_comptc"] = pd.to_datetime(df["dt_comptc"])
-    return df
+    return _otimizar_memoria(df)
 
 
 @st.cache_data(show_spinner=False)
@@ -172,7 +199,7 @@ def carregar_carteira() -> pd.DataFrame:
     _garantir_dados_hf(config.CARTEIRA, "fidc_carteira.parquet")
     if not config.CARTEIRA.exists():
         return pd.DataFrame()
-    return pd.read_parquet(config.CARTEIRA)
+    return _otimizar_memoria(pd.read_parquet(config.CARTEIRA))
 
 
 def fmt_bi(v):
@@ -264,10 +291,12 @@ top_adm = (df.groupby("admin")["vl_pl"].sum().sort_values(ascending=False)
 sel_adm = st.sidebar.multiselect("Administrador", top_adm, default=[])
 top_gest = (df.groupby("gestor")["vl_pl"].sum().sort_values(ascending=False)
             .index.tolist() if "gestor" in df.columns else [])
-sel_gest = st.sidebar.multiselect("Gestor", top_gest, default=[])
+sel_gest = (st.sidebar.multiselect("Gestor", top_gest, default=[]) if top_gest else [])
 anbima_opts = (sorted(df["classe_anbima"].dropna().unique().tolist())
                if "classe_anbima" in df.columns else [])
-sel_anbima = st.sidebar.multiselect("Classificação ANBIMA", anbima_opts, default=[])
+# Esconde o filtro quando não há dados (a CVM não classifica FIDC por ANBIMA).
+sel_anbima = (st.sidebar.multiselect("Classificação ANBIMA", anbima_opts, default=[])
+              if anbima_opts else [])
 
 st.sidebar.markdown("---")
 _cnpj_raw = st.sidebar.text_area(
@@ -333,6 +362,56 @@ sel_excl_unica = st.sidebar.checkbox(
     ),
 )
 
+st.sidebar.markdown("---")
+# Perfil do fundo (aprox.): distressed/NPL e ações judiciais/precatórios.
+# Combina sinais estruturados da carteira (% judicial, % inadimplência) com
+# palavras-chave no nome. Aproximado — a CVM não publica esse rótulo.
+_PAT_JUDICIAL = _re_cnpj.compile(
+    r"JUDICIAL|PRECAT|LITIG|JURID|HONORAR", _re_cnpj.IGNORECASE)
+_PAT_DISTRESSED = _re_cnpj.compile(
+    r"\bNPL\b|RECUPERA|INADIMPL|DISTRESS|REESTRUTUR|SPECIAL\s+SITUATION",
+    _re_cnpj.IGNORECASE)
+
+
+@st.cache_data(show_spinner=False)
+def _classifica_perfil(d: pd.DataFrame) -> dict:
+    """Classifica cada CNPJ (na última competência) como distressed e/ou judicial."""
+    if d.empty or "cnpj" not in d.columns:
+        return {"distressed": frozenset(), "judicial": frozenset()}
+    last = d.sort_values("dt_comptc").groupby("cnpj").tail(1).copy()
+    nome = last["denom_social"].astype(str)
+    seg_cols = [c for c in last.columns if c.startswith("seg_")]
+    seg_total = (last[seg_cols].sum(axis=1) if seg_cols
+                 else pd.Series(0.0, index=last.index))
+    pct_jud = last.get("seg_judicial", 0) / seg_total.where(seg_total > 0)
+    judicial = (pct_jud > 0.10).fillna(False) | nome.str.contains(_PAT_JUDICIAL, na=False)
+    base = last["vl_dircred"].where(last["vl_dircred"] > 0, last["vl_carteira"])
+    base = base.where(base > 0)
+    pct_inad = last["vl_inadimplente"] / base
+    pct_credinad = (last["vl_cred_inad"] / base
+                    if "vl_cred_inad" in last.columns else pct_inad * 0)
+    distressed = ((pct_inad > 0.50).fillna(False) | (pct_credinad > 0.50).fillna(False)
+                  | nome.str.contains(_PAT_DISTRESSED, na=False))
+    return {"distressed": frozenset(last.loc[distressed, "cnpj"]),
+            "judicial": frozenset(last.loc[judicial, "cnpj"])}
+
+
+_perfil = _classifica_perfil(df)
+cb_distressed = st.sidebar.checkbox(
+    f"💥 Distressed / NPL ({len(_perfil['distressed'])})", value=False,
+    help="Fundos com alta inadimplência na carteira (>50%) ou nome indicando "
+         "NPL / recuperação / distressed. Classificação aproximada.")
+cb_judicial = st.sidebar.checkbox(
+    f"⚖️ Ações judiciais / Precatórios ({len(_perfil['judicial'])})", value=False,
+    help="Fundos com segmento judicial relevante na carteira (>10%) ou nome "
+         "indicando precatório / judicial. Classificação aproximada.")
+_perfil_cnpjs = frozenset()
+if cb_distressed:
+    _perfil_cnpjs |= _perfil["distressed"]
+if cb_judicial:
+    _perfil_cnpjs |= _perfil["judicial"]
+_perfil_ativo = cb_distressed or cb_judicial
+
 st.sidebar.caption("💡 Clique numa barra do ranking de administradores para cruzar o painel.")
 
 # --------------------------------------------------------------------------- #
@@ -396,6 +475,8 @@ def aplica(d: pd.DataFrame) -> pd.DataFrame:
         m &= is_infra if sel_infra == "Infraestrutura (IE)" else ~is_infra
     if sel_excl_unica and _cota_unica_cnpjs and "cnpj" in d.columns:
         m &= ~d["cnpj"].isin(_cota_unica_cnpjs)
+    if _perfil_ativo and "cnpj" in d.columns:
+        m &= d["cnpj"].isin(_perfil_cnpjs)
     if xf_admin and "admin" in d:
         m &= d["admin"] == xf_admin
     return d[m]

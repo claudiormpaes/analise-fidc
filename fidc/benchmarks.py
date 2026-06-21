@@ -85,45 +85,55 @@ def fetch_cadastro(*, verbose: bool = True) -> pd.DataFrame:
     try:
         # ------------------------------------------------------------------ #
         # 1. registro_fundo_classe.zip: classe CNPJ → gestor do fundo pai
+        #    BEST-EFFORT: a CVM às vezes remove/renomeia esse arquivo (404).
+        #    Se falhar, seguimos só com o cad_fi.csv (passo 2), que já cobre
+        #    gestor e classe ANBIMA da maioria dos FIDCs.
         # ------------------------------------------------------------------ #
-        resp = config.SESSION.get(config.REG_URL, timeout=120)
-        resp.raise_for_status()
+        try:
+            resp = config.SESSION.get(config.REG_URL, timeout=120)
+            resp.raise_for_status()
 
-        with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
-            with z.open("registro_fundo.csv") as f:
-                rf = pd.read_csv(
-                    f, sep=";", dtype=str, encoding="latin-1",
-                    usecols=["ID_Registro_Fundo", "CNPJ_Fundo", "Gestor",
-                             "Tipo_Fundo", "Situacao"],
-                )
-            rf["cnpj"] = rf["CNPJ_Fundo"].apply(_fmt_cnpj)
-            rf["gestor"] = rf["Gestor"].str.strip().str.title()
-            # Mapa ID → gestor para resolver classes
-            id_to_gestor = (rf.dropna(subset=["gestor"])
-                            .set_index("ID_Registro_Fundo")["gestor"].to_dict())
-            # Mapa ID → cnpj_fundo (para enriquecimento de metadados via cad_fi)
-            id_to_cnpj_fundo = rf.set_index("ID_Registro_Fundo")["cnpj"].to_dict()
+            with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+                with z.open("registro_fundo.csv") as f:
+                    rf = pd.read_csv(
+                        f, sep=";", dtype=str, encoding="latin-1",
+                        usecols=["ID_Registro_Fundo", "CNPJ_Fundo", "Gestor",
+                                 "Tipo_Fundo", "Situacao"],
+                    )
+                rf["cnpj"] = rf["CNPJ_Fundo"].apply(_fmt_cnpj)
+                rf["gestor"] = rf["Gestor"].str.strip().str.title()
+                # Mapa ID → gestor para resolver classes
+                id_to_gestor = (rf.dropna(subset=["gestor"])
+                                .set_index("ID_Registro_Fundo")["gestor"].to_dict())
+                # Mapa ID → cnpj_fundo (para enriquecimento de metadados via cad_fi)
+                id_to_cnpj_fundo = rf.set_index("ID_Registro_Fundo")["cnpj"].to_dict()
 
-            with z.open("registro_classe.csv") as f:
-                rc = pd.read_csv(
-                    f, sep=";", dtype=str, encoding="latin-1",
-                    usecols=["ID_Registro_Fundo", "CNPJ_Classe",
-                             "Tipo_Classe", "Classificacao_Anbima", "Situacao"],
-                )
+                with z.open("registro_classe.csv") as f:
+                    rc = pd.read_csv(
+                        f, sep=";", dtype=str, encoding="latin-1",
+                        usecols=["ID_Registro_Fundo", "CNPJ_Classe",
+                                 "Tipo_Classe", "Classificacao_Anbima", "Situacao"],
+                    )
 
-        rc_fidc = rc[rc["Tipo_Classe"].str.contains("FIDC", case=False, na=False)].copy()
-        rc_fidc["cnpj"] = rc_fidc["CNPJ_Classe"].apply(_fmt_cnpj)
-        rc_fidc["gestor"] = rc_fidc["ID_Registro_Fundo"].map(id_to_gestor)
-        rc_fidc["cnpj_fundo"] = rc_fidc["ID_Registro_Fundo"].map(id_to_cnpj_fundo)
-        rc_fidc["classe_anbima"] = rc_fidc["Classificacao_Anbima"].str.strip().where(
-            rc_fidc["Classificacao_Anbima"].notna())
-        rc_fidc["sit"] = rc_fidc["Situacao"].str.strip()
+            rc_fidc = rc[rc["Tipo_Classe"].str.contains("FIDC", case=False, na=False)].copy()
+            rc_fidc["cnpj"] = rc_fidc["CNPJ_Classe"].apply(_fmt_cnpj)
+            rc_fidc["gestor"] = rc_fidc["ID_Registro_Fundo"].map(id_to_gestor)
+            rc_fidc["cnpj_fundo"] = rc_fidc["ID_Registro_Fundo"].map(id_to_cnpj_fundo)
+            rc_fidc["classe_anbima"] = rc_fidc["Classificacao_Anbima"].str.strip().where(
+                rc_fidc["Classificacao_Anbima"].notna())
+            rc_fidc["sit"] = rc_fidc["Situacao"].str.strip()
 
-        # Fundos FIDC diretos do registro (pre-Res.175)
-        rf_fidc = rf[rf["Tipo_Fundo"].str.upper().str.contains("FIDC", na=False)].copy()
-        rf_fidc["cnpj_fundo"] = rf_fidc["cnpj"]
-        rf_fidc["sit"] = rf_fidc["Situacao"].str.strip()
-        rf_fidc["classe_anbima"] = None
+            # Fundos FIDC diretos do registro (pre-Res.175)
+            rf_fidc = rf[rf["Tipo_Fundo"].str.upper().str.contains("FIDC", na=False)].copy()
+            rf_fidc["cnpj_fundo"] = rf_fidc["cnpj"]
+            rf_fidc["sit"] = rf_fidc["Situacao"].str.strip()
+            rf_fidc["classe_anbima"] = None
+        except Exception as exc_reg:  # noqa: BLE001
+            print(f"  [aviso] registro_fundo_classe indisponivel ({exc_reg}); "
+                  "enriquecendo apenas via cad_fi.csv")
+            rc_fidc = pd.DataFrame(columns=["cnpj", "gestor", "cnpj_fundo",
+                                            "classe_anbima", "sit"])
+            rf_fidc = pd.DataFrame(columns=["cnpj", "gestor", "cnpj_fundo", "sit"])
 
         # ------------------------------------------------------------------ #
         # 2. cad_fi.csv: ANBIMA, taxas, sit para fundos (pré-Res.175)
@@ -168,10 +178,20 @@ def fetch_cadastro(*, verbose: bool = True) -> pd.DataFrame:
         fundo_rows["gestor"] = fundo_rows["gestor"].combine_first(fundo_rows["gestor_cad"])
         fundo_rows["classe_anbima"] = fundo_rows["classe_anbima_cad"]
 
+        # Rede de segurança: linhas direto do cad_fi (cnpj do FUNDO). Cobrem os
+        # FIDCs mesmo quando o registro_fundo_classe.zip está fora do ar.
+        cad_rows = cad_meta.rename(columns={
+            "cnpj_fundo": "cnpj", "gestor_cad": "gestor",
+            "classe_anbima_cad": "classe_anbima"}).copy()
+        cad_rows["sit"] = None
+
         cols_final = ["cnpj", "gestor", "classe_anbima", "taxa_adm", "taxa_perfm", "sit"]
-        result = (pd.concat([fundo_rows[cols_final], classe_rows[cols_final]],
-                            ignore_index=True)
-                  .drop_duplicates(subset=["cnpj"], keep="last")
+        # Preferência (keep="first"): classes pós-Res.175, depois fundos do
+        # registro, e por último o cad_fi como fallback.
+        result = (pd.concat([classe_rows[cols_final], fundo_rows[cols_final],
+                             cad_rows[cols_final]], ignore_index=True)
+                  .dropna(subset=["cnpj"])
+                  .drop_duplicates(subset=["cnpj"], keep="first")
                   .reset_index(drop=True))
 
         if verbose:

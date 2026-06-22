@@ -29,12 +29,23 @@ jobs:
 
       - name: Executar pipeline ETL
         env:
-          # Proxy com IP brasileiro: a CVM bloqueia os IPs do GitHub Actions.
-          # Aplicado só às requisições CVM/BACEN (config.SESSION); os uploads ao
-          # HF abaixo seguem diretos. Configure o secret CVM_PROXY no repositório
-          # (ex.: http://user:senha@host:porta). Se vazio, roda sem proxy.
+          # Acesso direto à CVM. A CVM (dados.cvm.gov.br) às vezes recusa/expira a
+          # conexão dos runners do GitHub — por isso o passo re-tenta abaixo.
+          # (CVM_PROXY fica vazio; se um dia houver um proxy BR que NÃO bloqueie a
+          #  CVM, basta definir o secret CVM_PROXY que o config.SESSION o usa.)
           CVM_PROXY: ${{ secrets.CVM_PROXY }}
-        run: python -m fidc.pipeline
+        run: |
+          n=0; max=4
+          until python -m fidc.pipeline; do
+            n=$((n+1))
+            if [ "$n" -ge "$max" ]; then
+              echo "::error::Pipeline falhou após $max tentativas (CVM indisponível)."
+              exit 1
+            fi
+            espera=$((n*120))
+            echo "Tentativa $n falhou (CVM provavelmente fora do ar). Aguardando ${espera}s e re-tentando..."
+            sleep "$espera"
+          done
 
       - name: Publicar parquets no HF Dataset
         env:

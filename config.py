@@ -80,6 +80,27 @@ HTTP_MAX_RETRIES = 5
 HTTP_BACKOFF_FACTOR = 1.5  # espera 0s, 1.5s, 3s, 6s, 12s entre as tentativas
 
 
+def _normalizar_proxy(p: str | None) -> str | None:
+    """Aceita vários formatos e devolve 'http://user:senha@host:porta'.
+
+    Suporta: URL completa; 'user:senha@host:porta'; e o formato cru do IPRoyal
+    'host:porta:user:senha' (sem @ e sem esquema) — mesma lógica do app Faro.
+    """
+    if not p:
+        return None
+    p = p.strip()
+    if p.startswith(("http://", "https://", "socks5://", "socks4://")):
+        return p
+    if "@" in p:                      # user:senha@host:porta
+        return "http://" + p
+    partes = p.split(":")             # host:porta:user:senha (IPRoyal)
+    if len(partes) >= 4 and partes[1].isdigit():
+        host, porta, user = partes[0], partes[1], partes[2]
+        senha = ":".join(partes[3:])
+        return f"http://{user}:{senha}@{host}:{porta}"
+    return "http://" + p
+
+
 def _build_session() -> requests.Session:
     """Session com retry em erros de conexão, timeout de leitura e 5xx/429."""
     retry = Retry(
@@ -104,7 +125,7 @@ def _build_session() -> requests.Session:
     # nesta Session — assim os uploads ao Hugging Face seguem diretos, sem passar
     # pelo proxy. Defina o secret/variável de ambiente CVM_PROXY
     # (ex.: http://user:senha@host:porta) no workflow do ETL.
-    proxy = os.environ.get("CVM_PROXY", "").strip()
+    proxy = _normalizar_proxy(os.environ.get("CVM_PROXY"))
     if proxy:
         session.proxies = {"http": proxy, "https": proxy}
         session.trust_env = False  # ignora HTTP(S)_PROXY do ambiente; usa só este

@@ -76,14 +76,3 @@ jobs:
               print(f"Falha em {len(erros)} arquivo(s): {erros}")
               sys.exit(1)
           EOF
-
-      - name: Reiniciar HF Space
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          python - <<'EOF'
-          import os
-          from huggingface_hub import HfApi
-          HfApi(token=os.environ["HF_TOKEN"]).restart_space("claudiormpaes/analise-fidc")
-          print("Space reiniciado.")
-          EOF

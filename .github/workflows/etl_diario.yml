@@ -60,6 +60,8 @@ jobs:
           arquivos = [
               "fidc_consolidado.parquet",
               "fidc_cotas.parquet",
+              "fidc_cedentes.parquet",
+              "cedentes_nomes.parquet",
               "cdi_mensal.parquet",
               "ipca_mensal.parquet",
               "selic_mensal.parquet",

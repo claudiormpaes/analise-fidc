@@ -10,21 +10,7 @@ COPY . .
 # Assa os dados do HF DENTRO da imagem (no build), eliminando o download lento e
 # rate-limited a cada cold start no Cloud Run. Os dados ficam tão atuais quanto o
 # último deploy (o ETL diário continua atualizando o HF; basta redeployar p/ refrescar).
-RUN python - <<'PY'
-import os, shutil
-from huggingface_hub import hf_hub_download
-os.makedirs('data/processed', exist_ok=True)
-arquivos = ['fidc_consolidado.parquet', 'fidc_cotas.parquet', 'fidc_cedentes.parquet',
-            'cedentes_nomes.parquet', 'fidc_carteira.parquet', 'cdi_mensal.parquet',
-            'ipca_mensal.parquet', 'selic_mensal.parquet']
-for f in arquivos:
-    try:
-        shutil.copy(hf_hub_download(repo_id='claudiormpaes/fidc-dados', filename=f,
-                                    repo_type='dataset'), os.path.join('data/processed', f))
-        print('baked', f)
-    except Exception as e:  # arquivo ainda não publicado: o app baixa em runtime
-        print('skip', f, '->', e)
-PY
+RUN python bake_data.py
 
 # O Cloud Run injeta a porta em $PORT (8080). No HF Spaces a var não existe,
 # então caímos no padrão 7860. Assim o mesmo Dockerfile serve nos dois.

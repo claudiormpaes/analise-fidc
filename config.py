@@ -31,8 +31,11 @@ RAW_DIR = DATA_DIR / "raw"            # ZIPs originais da CVM
 PROCESSED_DIR = DATA_DIR / "processed"
 PARTS_DIR = PROCESSED_DIR / "parts"            # parquet por ZIP (fato fundo)
 PARTS_COTAS_DIR = PROCESSED_DIR / "parts_cotas"  # parquet por ZIP (fato cotas)
+PARTS_CEDENTES_DIR = PROCESSED_DIR / "parts_cedentes"  # parquet por ZIP (fato cedente)
 CONSOLIDADO = PROCESSED_DIR / "fidc_consolidado.parquet"        # fato fundo-mês
 CONSOLIDADO_COTAS = PROCESSED_DIR / "fidc_cotas.parquet"        # fato série/cota-mês
+CONSOLIDADO_CEDENTES = PROCESSED_DIR / "fidc_cedentes.parquet"  # fato fundo-cedente-mês
+CEDENTES_NOMES = PROCESSED_DIR / "cedentes_nomes.parquet"       # CNPJ cedente -> razão social (BrasilAPI)
 CDI_MENSAL = PROCESSED_DIR / "cdi_mensal.parquet"              # benchmark CDI (BACEN SGS)
 IPCA_MENSAL = PROCESSED_DIR / "ipca_mensal.parquet"            # IPCA mensal (BACEN SGS 433)
 SELIC_MENSAL = PROCESSED_DIR / "selic_mensal.parquet"          # SELIC mensal (BACEN SGS 4189)
@@ -137,5 +140,5 @@ SESSION = _build_session()
 
 def ensure_dirs() -> None:
     """Cria a árvore de diretórios de dados se ainda não existir."""
-    for d in (RAW_DIR, PARTS_DIR, PARTS_COTAS_DIR, PROCESSED_DIR):
+    for d in (RAW_DIR, PARTS_DIR, PARTS_COTAS_DIR, PARTS_CEDENTES_DIR, PROCESSED_DIR):
         d.mkdir(parents=True, exist_ok=True)

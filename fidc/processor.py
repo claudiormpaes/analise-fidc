@@ -157,6 +157,99 @@ def _concentracao_cedentes(base: pd.DataFrame) -> pd.DataFrame | None:
     return sub.drop_duplicates(subset=C.CHAVE, keep="last")
 
 
+def _normaliza_doc(serie: pd.Series) -> pd.DataFrame:
+    """Normaliza CPF/CNPJ de cedente. Devolve doc, doc_tipo e raiz (8 díg. do CNPJ).
+
+    A CVM mistura CPF (11 díg.) e CNPJ (14 díg.) no mesmo campo e, em alguns
+    informes, zeros à esquerda do CNPJ se perdem (vira 12/13 díg.). Regra:
+      - 11 díg.  -> CPF (raiz vazia: cedente pessoa física, anonimizado no painel)
+      - 8..14 díg. e != 11 -> CNPJ (zfill p/ 14; raiz = 8 primeiros)
+      - dummies (só 0 ou só 9) e curtos demais (<8) -> inválido (descartado depois)
+    """
+    # astype(object): garante o motor de regex do Python (RE2/Arrow não suporta
+    # retrovínculo \1 usado para detectar dígito único repetido).
+    digits = (serie.fillna("").astype(str)
+              .str.replace(r"\D", "", regex=True).astype(object))
+    n = digits.str.len()
+    # Sentinelas da CVM para "cedente diverso/pulverizado" ou campo não informado:
+    # sequências de 0 ou 9 (inclusive variações como 9999999999999 8 / ...97) e
+    # documentos com um único dígito repetido (000..., 111..., 999...).
+    # 8+ zeros/noves à esquerda cobre raízes reservadas (00000000.../99999999...,
+    # com ou sem o sufixo /0001-91); nenhum CNPJ/CPF real começa assim.
+    sentinela = (digits.str.match(r"^0{8,}").fillna(False)
+                 | digits.str.match(r"^9{8,}").fillna(False)
+                 | digits.str.fullmatch(r"(\d)\1+").fillna(False))
+    invalido = (n < 8) | (n > 14) | sentinela
+    eh_cpf = (n == 11) & ~invalido
+    eh_cnpj = (n >= 8) & (n <= 14) & (n != 11) & ~invalido
+
+    doc = digits.where(eh_cpf, digits.str.zfill(14))   # CNPJ -> 14 díg.; CPF fica 11
+    doc = doc.where(~eh_cpf, digits)                    # garante CPF intacto
+    doc_tipo = pd.Series("invalido", index=serie.index)
+    doc_tipo = doc_tipo.mask(eh_cpf, "CPF").mask(eh_cnpj, "CNPJ")
+    raiz = doc.str[:8].where(eh_cnpj, other=pd.NA)
+    return pd.DataFrame({"doc": doc.where(~invalido, other=pd.NA),
+                         "doc_tipo": doc_tipo, "raiz": raiz}, index=serie.index)
+
+
+def _extrair_cedentes(base: pd.DataFrame) -> pd.DataFrame | None:
+    """Extrai os cedentes nomeados da Tab. I em formato longo (1 linha/cedente).
+
+    Para cada fundo-mês, percorre os blocos com/sem risco e os 9 slots de cedente,
+    desempilhando CPF_CNPJ_CEDENTE_n + PR_CEDENTE_n. Estima a exposição em R$ de
+    cada cedente como PR% × valor da carteira do bloco. Descarta documentos
+    inválidos/dummy e percentuais fora de (0, 100].
+    """
+    id_cols = [c for c in ["cnpj", "dt_comptc", "denom_social"] if c in base.columns]
+    if "cnpj" not in id_cols:
+        return None
+    partes = []
+    for bloco, prefixo, val_col in C.CEDENTE_BLOCOS:
+        vl_bloco = (pd.to_numeric(base[val_col], errors="coerce")
+                    if val_col in base.columns else pd.Series(np.nan, index=base.index))
+        for slot in range(1, C.CEDENTE_MAX_SLOT + 1):
+            col_doc = f"{prefixo}_CPF_CNPJ_CEDENTE_{slot}"
+            col_pr = f"{prefixo}_PR_CEDENTE_{slot}"
+            if col_doc not in base.columns or col_pr not in base.columns:
+                continue
+            pr = pd.to_numeric(base[col_pr], errors="coerce")
+            sub = base[id_cols].copy()
+            sub["bloco"] = bloco
+            sub["rank"] = slot
+            sub = sub.join(_normaliza_doc(base[col_doc]))
+            sub["pr_cedente"] = pr
+            sub["vl_bloco"] = vl_bloco.values
+            partes.append(sub)
+    if not partes:
+        return None
+    ced = pd.concat(partes, ignore_index=True)
+    # Mantém só cedentes válidos com percentual plausível
+    ced = ced[ced["doc"].notna() & (ced["doc_tipo"] != "invalido")]
+    ced = ced[(ced["pr_cedente"] > 0) & (ced["pr_cedente"] <= 100)]
+    if ced.empty:
+        return ced
+    # Exposição estimada em R$ = PR% × valor da carteira do bloco. Valor de
+    # carteira ausente/negativo (erro de digitação na fonte) -> exposição NaN.
+    vl_bloco_ok = ced["vl_bloco"].where(ced["vl_bloco"] > 0)
+    ced["vl_estimado"] = ced["pr_cedente"] / 100.0 * vl_bloco_ok
+    return ced.drop_duplicates(subset=["cnpj", "dt_comptc", "bloco", "rank", "doc"],
+                               keep="last").reset_index(drop=True)
+
+
+def _derivar_cedentes(ced: pd.DataFrame) -> pd.DataFrame:
+    """Adiciona competência/ano ao fato de cedentes."""
+    if ced is None or ced.empty:
+        return pd.DataFrame()
+    ced = ced.copy()
+    ced["dt_comptc"] = pd.to_datetime(ced["dt_comptc"], errors="coerce")
+    ced = ced.dropna(subset=["dt_comptc"])
+    ced["competencia"] = ced["dt_comptc"].dt.to_period("M").astype(str)
+    ced["ano"] = ced["dt_comptc"].dt.year
+    if "denom_social" in ced.columns:
+        ced["denom_social"] = ced["denom_social"].astype("string").str.strip()
+    return ced.reset_index(drop=True)
+
+
 def _derivar_fundo(fato: pd.DataFrame) -> pd.DataFrame:
     if fato.empty:
         return fato
@@ -276,13 +369,22 @@ def _derivar_cotas(cotas: pd.DataFrame, fato_fundo: pd.DataFrame) -> pd.DataFram
     return cotas
 
 
-def processar_zip(caminho_zip) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Lê um ZIP da CVM e devolve (fato_fundo, fato_cotas)."""
+def _processar_cedentes(zf, nomes) -> pd.DataFrame:
+    """Lê a Tab. I do ZIP e devolve o fato de cedentes nomeados (formato longo)."""
+    base = _ler_tabela(zf, nomes, "tab_I")
+    if base is None:
+        return pd.DataFrame()
+    return _derivar_cedentes(_extrair_cedentes(base))
+
+
+def processar_zip(caminho_zip) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Lê um ZIP da CVM e devolve (fato_fundo, fato_cotas, fato_cedentes)."""
     with zipfile.ZipFile(caminho_zip) as zf:
         nomes = [n for n in zf.namelist() if n.lower().endswith(".csv")]
         fundo = _processar_fundo(zf, nomes)
         cotas = _processar_cotas(zf, nomes, fundo)
-    return fundo, cotas
+        cedentes = _processar_cedentes(zf, nomes)
+    return fundo, cotas, cedentes
 
 
 # --------------------------------------------------------------------------- #
@@ -296,9 +398,11 @@ def _carregar_manifest() -> dict:
 
 def _concatena_parts(parts_dir, chave: list[str], destino, verbose: bool):
     parts = sorted(parts_dir.glob("*.parquet"))
-    if not parts:
+    # Ignora parts vazios/sem a coluna de data (ex.: layout antigo sem cedentes).
+    dfs = [d for p in parts if not (d := pd.read_parquet(p)).empty and "dt_comptc" in d.columns]
+    if not dfs:
         return pd.DataFrame()
-    todos = pd.concat((pd.read_parquet(p) for p in parts), ignore_index=True)
+    todos = pd.concat(dfs, ignore_index=True)
     todos = todos.sort_values("dt_comptc").drop_duplicates(subset=chave, keep="last")
     todos = todos.reset_index(drop=True)
     todos.to_parquet(destino, index=False)
@@ -317,19 +421,24 @@ def consolidar(*, verbose: bool = True) -> None:
     for z in zips:
         part_f = config.PARTS_DIR / (z.stem + ".parquet")
         part_c = config.PARTS_COTAS_DIR / (z.stem + ".parquet")
+        part_ced = config.PARTS_CEDENTES_DIR / (z.stem + ".parquet")
         tam_atual = z.stat().st_size
         tam_proc = manifest.get(z.name, {}).get("size_processed")
-        if part_f.exists() and part_c.exists() and tam_proc == tam_atual:
+        if part_f.exists() and part_c.exists() and part_ced.exists() and tam_proc == tam_atual:
             continue
         try:
-            fundo, cotas = processar_zip(z)
+            fundo, cotas, cedentes = processar_zip(z)
             if not fundo.empty:
                 fundo.to_parquet(part_f, index=False)
             if not cotas.empty:
                 cotas.to_parquet(part_c, index=False)
+            # Sempre (re)escreve o part de cedentes — inclusive vazio, p/ marcar
+            # o ZIP como processado e não reprocessar à toa.
+            cedentes.to_parquet(part_ced, index=False)
             manifest.setdefault(z.name, {})["size_processed"] = tam_atual
             if verbose:
-                print(f"  [ok ] {z.name}: {len(fundo):,} fundos | {len(cotas):,} cotas")
+                print(f"  [ok ] {z.name}: {len(fundo):,} fundos | "
+                      f"{len(cotas):,} cotas | {len(cedentes):,} cedentes")
         except Exception as exc:  # noqa: BLE001
             print(f"  [erro] {z.name}: {exc}")
 
@@ -338,6 +447,9 @@ def consolidar(*, verbose: bool = True) -> None:
     fundo = _concatena_parts(config.PARTS_DIR, C.CHAVE, config.CONSOLIDADO, verbose)
     cotas = _concatena_parts(config.PARTS_COTAS_DIR, C.CHAVE + ["classe_serie"],
                              config.CONSOLIDADO_COTAS, verbose)
+    _concatena_parts(config.PARTS_CEDENTES_DIR,
+                     ["cnpj", "dt_comptc", "bloco", "rank", "doc"],
+                     config.CONSOLIDADO_CEDENTES, verbose)
 
     # Enriquece com gestor e metadados do cadastro CVM (best-effort)
     if not fundo.empty:

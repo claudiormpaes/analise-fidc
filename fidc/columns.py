@@ -49,6 +49,22 @@ TAB_VII_VALORES = {
     "vl_cedentes": "TAB_VII_B1_2_VL_CEDENTE",
 }
 
+# --------------------------------------------------------------------------- #
+# Cedentes nomeados (Tabela I.2.A.12 / I.2.B.12)
+# --------------------------------------------------------------------------- #
+# A CVM lista até 9 maiores cedentes de cada bloco da carteira, identificados
+# por CPF/CNPJ e com o percentual (PR) que representam dentro daquele bloco:
+#   - bloco "com risco"  (I.2.A): direitos creditórios com coobrigação do cedente
+#   - bloco "sem risco"  (I.2.B): aquisição definitiva, sem coobrigação
+# Cada bloco aponta para o valor total da carteira correspondente, usado para
+# estimar a exposição em R$ de cada cedente (PR% × valor do bloco).
+CEDENTE_BLOCOS = [
+    # (rótulo, prefixo das colunas CPF_CNPJ/PR, coluna de valor da carteira do bloco)
+    ("com_risco", "TAB_I2A12", "TAB_I2A_VL_DIRCRED_RISCO"),
+    ("sem_risco", "TAB_I2B12", "TAB_I2B_VL_DIRCRED_SEM_RISCO"),
+]
+CEDENTE_MAX_SLOT = 9  # nº de cedentes listados por bloco (CEDENTE_1 .. CEDENTE_9)
+
 # Tabela IV — patrimônio líquido.
 TAB_IV_VALORES = {
     "vl_pl": "TAB_IV_A_VL_PL",

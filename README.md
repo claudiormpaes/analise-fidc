@@ -46,7 +46,9 @@ analise_fidc/
     ├── raw/               # ZIPs originais + manifest.json
     └── processed/
         ├── fidc_consolidado.parquet   # fato fundo-mês (PL, ativo, risco, segmentos…)
-        └── fidc_cotas.parquet         # fato série/cota-mês (senioridade, rentab., fluxo)
+        ├── fidc_cotas.parquet         # fato série/cota-mês (senioridade, rentab., fluxo)
+        ├── fidc_cedentes.parquet      # fato fundo-cedente-mês (CPF/CNPJ, % e exposição estimada)
+        └── cedentes_nomes.parquet     # cache CNPJ→razão social/UF dos maiores cedentes (BrasilAPI)
 ```
 
 ## Funcionalidades do dashboard
@@ -69,6 +71,7 @@ exclusivo · administrador (+ cross-filter por clique).
 - **🏆 Rankings** — top administradores e maiores fundos (clique numa linha → **drill-through** para o deep-dive)
 - **🔎 Fundo (deep-dive)** — perfil completo de um fundo: PL, inadimplência, séries por senioridade, valor da cota, rentabilidade e cotistas
 - **👥 Investidores** — nº de cotistas por tipo (PF, banco, **EFPC/fundos de pensão**, RPPS…) e evolução do total de contas
+- **🗺️ Cedentes / Originadores** — mapa dos cedentes nomeados (CPF/CNPJ na Tab. I): **maiores cedentes** por exposição estimada, **cedentes compartilhados** entre fundos (risco de contraparte sistêmico), **rede cedente↔fundo**, distribuição por UF, evolução e **drill cedente→fundos**. Razão social dos maiores cedentes via BrasilAPI; CPF anonimizado (LGPD)
 - **🚨 Alertas** — radar de deterioração por fundo (alta de inadimplência, queda de subordinação, encolhimento de PL) com limiares ajustáveis e export
 - **📋 Dados** — tabelas e export CSV
 
@@ -133,6 +136,7 @@ Logs ficam em `data/pipeline.log`.
 | Cotistas por tipo de investidor | Tab. X.1.1 (PF, banco, EFPC, RPPS…) — a partir de 2019 |
 | Alertas de deterioração | Δ inadimplência / subordinação / PL entre a competência de referência e ~3 meses antes |
 | Concentração de cedentes | Tab. I — % do maior cedente (e dos 5 maiores) entre os fundos que listam cedentes |
+| Cedentes nomeados (mapa) | Tab. I.2.A.12 + I.2.B.12 — CPF/CNPJ dos até 9 maiores cedentes de cada bloco (com/sem risco) e seu % na carteira; exposição estimada = % × carteira do bloco. **A partir de 11/2019** |
 | Rentabilidade vs CDI | rentab. mediana das séries que reportam − CDI mensal (BACEN/SGS série 4391) |
 
 > **Por que ratear o PL e não somar qt×valor da cota?** Alguns fundos reportam

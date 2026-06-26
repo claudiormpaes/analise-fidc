@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from fidc import benchmarks, carteira, downloader, processor
+from fidc import benchmarks, carteira, cedentes_nomes, downloader, processor
 
 
 def run(*, verbose: bool = True) -> None:
@@ -34,6 +34,12 @@ def run(*, verbose: bool = True) -> None:
         carteira.sincronizar(verbose=verbose)
     except Exception as exc:  # noqa: BLE001
         print(f"  [aviso] CDA carteira não atualizado: {exc}")
+
+    # Razão social dos maiores cedentes via BrasilAPI (best-effort, incremental)
+    try:
+        cedentes_nomes.enriquecer(verbose=verbose)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [aviso] nomes de cedentes não enriquecidos: {exc}")
 
     if verbose:
         print(f"\nConcluído em {time.time() - inicio:.1f}s.")
